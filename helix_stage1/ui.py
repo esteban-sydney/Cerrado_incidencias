@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .automation import AutomationWorker, WorkerCommand, WorkerEvent
 from .config import LOG_DIR
@@ -18,6 +19,7 @@ INCIDENT_PATTERN = re.compile(r"INC\d{12}", re.IGNORECASE)
 PARTIAL_INCIDENT_PATTERN = re.compile(r"(?:I(?:N(?:C\d{0,12})?)?)?", re.IGNORECASE)
 INCIDENT_HEADER_NAMES = {"incidencia", "incidencias"}
 REPORT_HEADER = "numero de incidencia      Estado"
+REPORT_TITLE_FORMAT = "%m/%d/%Y   %H:%M hrs"
 BatchStatus = Literal["OK", "ERROR"]
 
 
@@ -34,6 +36,13 @@ def _create_logger() -> logging.Logger:
     return logger
 
 
+def _report_now() -> datetime:
+    try:
+        return datetime.now(ZoneInfo("America/Santiago"))
+    except ZoneInfoNotFoundError:
+        return datetime.now()
+
+
 class HelixApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
@@ -48,8 +57,8 @@ class HelixApp:
         self.batch_results: list[tuple[str, BatchStatus, str]] = []
 
         root.title("Consulta de incidencias | BMC Helix")
-        root.geometry("680x560")
-        root.minsize(620, 500)
+        root.geometry("760x680")
+        root.minsize(680, 560)
         root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         style = ttk.Style(root)
@@ -60,7 +69,7 @@ class HelixApp:
         container = ttk.Frame(root, padding=12)
         container.pack(fill="both", expand=True)
         container.columnconfigure(0, weight=1)
-        container.rowconfigure(4, weight=1)
+        container.rowconfigure(5, weight=1)
 
         ttk.Label(container, text="Cierre de incidencias Helix", style="Title.TLabel").grid(
             row=0, column=0, sticky="w"
@@ -189,11 +198,30 @@ class HelixApp:
             row=0, column=0, sticky="ew", padx=8, pady=6
         )
 
+        results_frame = ttk.LabelFrame(container, text="Resultados", style="Section.TLabelframe")
+        results_frame.grid(row=4, column=0, sticky="ew", pady=(0, 10))
+        results_frame.columnconfigure(0, weight=1)
+        self.results_table = ttk.Treeview(
+            results_frame,
+            columns=("index", "incident", "status", "detail"),
+            show="headings",
+            height=4,
+        )
+        self.results_table.heading("index", text="#")
+        self.results_table.heading("incident", text="Incidencia")
+        self.results_table.heading("status", text="Estado")
+        self.results_table.heading("detail", text="Detalle")
+        self.results_table.column("index", width=42, anchor="center", stretch=False)
+        self.results_table.column("incident", width=150, stretch=False)
+        self.results_table.column("status", width=82, anchor="center", stretch=False)
+        self.results_table.column("detail", width=420, stretch=True)
+        self.results_table.grid(row=0, column=0, sticky="ew", padx=8, pady=6)
+
         log_frame = ttk.LabelFrame(container, text="Registro", style="Section.TLabelframe")
-        log_frame.grid(row=4, column=0, sticky="nsew")
+        log_frame.grid(row=5, column=0, sticky="nsew")
         log_frame.rowconfigure(0, weight=1)
         log_frame.columnconfigure(0, weight=1)
-        self.log_text = tk.Text(log_frame, wrap="word", state="disabled", height=7)
+        self.log_text = tk.Text(log_frame, wrap="word", state="disabled", height=5)
         scrollbar = ttk.Scrollbar(log_frame, orient="vertical", command=self.log_text.yview)
         self.log_text.configure(yscrollcommand=scrollbar.set)
         self.log_text.grid(row=0, column=0, sticky="nsew")
@@ -261,10 +289,11 @@ class HelixApp:
         self.batch_progress_var.set(f"Pendientes: {len(incidents)}")
         self._set_idle_buttons()
         self._append_log(
-            f"Excel cargado: {Path(path).name} | válidas: {len(incidents)} | "
-            f"duplicadas omitidas: {duplicates} | inválidas omitidas: {len(invalid_values)}"
+            f"Excel cargado: {len(incidents)} incidencias válidas."
         )
         self._append_log(f"Resumen TXT generado: {report_path}")
+        if duplicates:
+            self._append_log(f"Duplicadas omitidas: {duplicates}")
         if invalid_values:
             preview = ", ".join(invalid_values[:5])
             suffix = "…" if len(invalid_values) > 5 else ""
@@ -400,6 +429,8 @@ class HelixApp:
             self.resolution_text.focus_set()
             return
 
+        self._clear_results_table()
+        self._append_log(f"{incident}: iniciado.")
         self._queue_incident(incident, resolver_group, resolver_user, resolution)
 
     def _start_excel_batch(self) -> None:
@@ -429,15 +460,25 @@ class HelixApp:
             self.resolution_text.focus_set()
             return
 
+        if not messagebox.askyesno(
+            "Confirmar cierre masivo",
+            "Se ejecutará el cierre masivo con estos datos:\n\n"
+            f"Incidencias: {len(self.loaded_incidents)}\n"
+            f"Grupo: {resolver_group}\n"
+            f"Usuario: {resolver_user}\n\n"
+            "¿Continuar?",
+        ):
+            self.status_var.set("Cierre masivo cancelado por el usuario.")
+            self._append_log("Cierre masivo cancelado.")
+            return
+
         self.batch_running = True
         self.batch_index = 0
         self.batch_results = []
+        self._clear_results_table()
         self.batch_progress.configure(maximum=len(self.loaded_incidents), value=0)
         self.batch_progress_var.set(f"Procesando 0/{len(self.loaded_incidents)}")
-        self._append_log(
-            f"Inicio de proceso Excel: {len(self.loaded_incidents)} incidencias. "
-            "Se ejecutarán una por una, volviendo a Inicio antes de continuar."
-        )
+        self._append_log(f"Cierre masivo iniciado: {len(self.loaded_incidents)} incidencias.")
         self._submit_next_batch_incident(resolver_group, resolver_user, resolution)
 
     def _submit_next_batch_incident(
@@ -451,9 +492,7 @@ class HelixApp:
         self.batch_progress_var.set(
             f"Procesando {self.batch_index + 1}/{len(self.loaded_incidents)}"
         )
-        self._append_log(
-            f"Lote Excel {self.batch_index + 1}/{len(self.loaded_incidents)}: enviando {incident}."
-        )
+        self._append_log(f"{incident}: iniciado.")
         self._queue_incident(incident, resolver_group, resolver_user, resolution)
 
     def _queue_incident(
@@ -467,14 +506,6 @@ class HelixApp:
         self._set_busy_buttons()
         self.status_var.set(
             f"Automatización en proceso: {incident}. No manipular Remedy hasta finalizar."
-        )
-        self._append_log(
-            "Automatización en proceso. Evita hacer clic manualmente en Remedy hasta que "
-            "la incidencia termine."
-        )
-        self._append_log(
-            f"Solicitud: {incident} | Grupo: {resolver_group} | Usuario: {resolver_user} "
-            "| Resolución: ingresada"
         )
         self.commands.put(
             WorkerCommand(
@@ -503,17 +534,61 @@ class HelixApp:
         self.busy = False
         self._set_idle_buttons()
 
+    def _clear_results_table(self) -> None:
+        for item in self.results_table.get_children():
+            self.results_table.delete(item)
+
+    def _append_result_row(self, incident: str, status: BatchStatus, detail: str) -> None:
+        row_number = len(self.results_table.get_children()) + 1
+        self.results_table.insert(
+            "",
+            "end",
+            values=(row_number, incident, status, self._shorten_detail(detail)),
+        )
+
+    @staticmethod
+    def _shorten_detail(message: str) -> str:
+        normalized = " ".join(message.split())
+        replacements = (
+            (
+                "Se pulsó Guardar, pero no se detectó confirmación; verifica Remedy antes de reintentar.",
+                "Guardada; confirmación visible no detectada.",
+            ),
+            ("Remedy confirmó el guardado.", "Guardada."),
+        )
+        for source, target in replacements:
+            if source in normalized:
+                return target
+        if "Helix redirigió a autenticación" in normalized:
+            return "Sesión expirada o redirigida a login."
+        if "campo editable" in normalized and "ID" in normalized:
+            return "No se abrió el campo de búsqueda de incidencia."
+        if "Redes Chile" in normalized:
+            return "No se encontró o abrió la pestaña Redes Chile."
+        if "Guardar está deshabilitado" in normalized:
+            return "No se pudo guardar: botón Guardar deshabilitado."
+        if "diálogo/modal inesperado" in normalized:
+            return normalized[:180]
+        return normalized[:180] or "Sin detalle."
+
     def _handle_incident_finished(
         self, incident: str | None, status: BatchStatus, message: str
     ) -> None:
         if not self.batch_running:
             self._finish_current_operation()
+            if incident:
+                self._clear_results_table()
+                self._append_result_row(incident, status, message)
             if status == "OK":
+                self._append_log(f"{incident}: cierre OK.")
                 messagebox.showinfo(
                     "Trabajo finalizado",
                     f"Cierre manual finalizado para {incident}.",
                 )
             else:
+                self._append_log(
+                    f"{incident or 'Incidencia'}: ERROR - {self._shorten_detail(message)}"
+                )
                 messagebox.showerror(
                     "Error en cierre manual",
                     f"No se pudo completar {incident or 'la incidencia'}.\n\n{message}",
@@ -522,6 +597,7 @@ class HelixApp:
 
         finished_incident = incident or self.loaded_incidents[self.batch_index]
         self.batch_results.append((finished_incident, status, message))
+        self._append_result_row(finished_incident, status, message)
         self.batch_index += 1
         self.batch_progress.configure(value=self.batch_index)
         if status == "ERROR":
@@ -534,9 +610,10 @@ class HelixApp:
                 f"Detenido: {self.batch_index}/{len(self.loaded_incidents)}"
             )
             self._append_log(
-                "Proceso Excel detenido por seguridad tras un error. "
-                f"Reporte parcial generado: {report_path}"
+                f"{finished_incident}: ERROR - {self._shorten_detail(message)}"
             )
+            self._append_log("Cierre masivo detenido por seguridad.")
+            self._append_log(f"Reporte parcial generado: {report_path}")
             self._finish_current_operation()
             messagebox.showerror(
                 "Cierre masivo detenido",
@@ -544,6 +621,7 @@ class HelixApp:
             )
             return
 
+        self._append_log(f"{finished_incident}: cierre OK.")
         resolver_group = self.resolver_group_var.get()
         resolver_user = self.resolver_user_var.get()
         resolution = self.resolution_text.get("1.0", "end-1c").strip()
@@ -560,7 +638,8 @@ class HelixApp:
         )
         self.batch_progress.configure(value=len(self.loaded_incidents))
         self.batch_progress_var.set(f"Finalizado: {ok_count} OK, {error_count} errores")
-        self._append_log(f"Proceso Excel finalizado. Reporte generado: {report_path}")
+        self._append_log(f"Cierre masivo finalizado: {ok_count} OK, {error_count} errores.")
+        self._append_log(f"Reporte generado: {report_path}")
         self._finish_current_operation()
         messagebox.showinfo(
             "Trabajos finalizados",
@@ -569,12 +648,28 @@ class HelixApp:
 
     def _write_batch_report(self) -> Path:
         LOG_DIR.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        now = _report_now()
+        timestamp = now.strftime("%Y%m%d_%H%M%S")
         report_path = LOG_DIR / f"resultado_cierre_excel_{timestamp}.txt"
         with report_path.open("w", encoding="utf-8") as report:
+            report.write(f"Cierres automatizados {now.strftime(REPORT_TITLE_FORMAT)}\n\n")
+            report.write(f"Grupo Resolutor: {self.resolver_group_var.get()}\n")
+            report.write(f"Usuario Resolutor: {self.resolver_user_var.get()}\n")
+            report.write(
+                "Resolución: "
+                + " ".join(self.resolution_text.get("1.0", "end-1c").strip().split())
+                + "\n\n"
+            )
+            ok_count = sum(1 for _incident, status, _message in self.batch_results if status == "OK")
+            error_count = len(self.batch_results) - ok_count
+            report.write("Resumen:\n")
+            report.write(f"Total: {len(self.batch_results)}\n")
+            report.write(f"OK: {ok_count}\n")
+            report.write(f"Errores: {error_count}\n\n")
+            report.write("Detalle:\n")
             report.write("numero de incidencia      Estado    Detalle\n")
             for incident, status, message in self.batch_results:
-                detail = " ".join(message.split())
+                detail = self._shorten_detail(message)
                 report.write(f"{incident:<25}{status:<10}{detail}\n")
         return report_path
 
@@ -589,12 +684,15 @@ class HelixApp:
             self.root.after(100, self._poll_events)
 
     def _handle_event(self, event: WorkerEvent) -> None:
-        self._append_log(event.message)
+        if event.kind == "log":
+            return
         if event.kind == "ready":
             self.status_var.set("Lista. Edge se abrirá al enviar una incidencia.")
+            self._append_log("Aplicación lista.")
             self._finish_current_operation()
         elif event.kind == "warning":
             self.status_var.set(event.message)
+            self._append_log(f"Advertencia: {event.message}")
             self._finish_current_operation()
         elif event.kind == "done":
             self.status_var.set(f"Incidencia verificada: {event.incident}")
