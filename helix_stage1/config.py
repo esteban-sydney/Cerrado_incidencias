@@ -8,7 +8,6 @@ HELIX_URL = (
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BROWSER_PROFILE_DIR = PROJECT_ROOT / "browser_profile"
 LOG_DIR = PROJECT_ROOT / "logs"
-SCREENSHOT_DIR = PROJECT_ROOT / "screenshots"
 
 DEFAULT_TIMEOUT_MS = 60_000
 NAVIGATION_TIMEOUT_MS = 90_000

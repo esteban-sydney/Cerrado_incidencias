@@ -5,7 +5,6 @@ import queue
 import re
 import threading
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from time import monotonic
 from urllib.parse import urlsplit
 
@@ -36,7 +35,6 @@ from .config import (
     RESOLVER_USER_SETTLE_DELAY_MS,
     SAVE_TO_HOME_DELAY_MS,
     SPA_READY_TIMEOUT_MS,
-    SCREENSHOT_DIR,
     SEARCH_ATTEMPTS,
     STATUS_MENU_SETTLE_DELAY_MS,
     STATUS_REASON_MENU_SETTLE_DELAY_MS,
@@ -605,9 +603,7 @@ class AutomationWorker(threading.Thread):
             self._emit("searched", message, incident)
         except Exception as error:
             self.logger.exception("Fallo procesando incidencia=%s resultado=%s", incident, result)
-            screenshot = self._capture_screenshot(incident)
-            suffix = f" Captura: {screenshot}" if screenshot else " No se pudo guardar captura."
-            self._emit("error", f"{error}{suffix}", incident)
+            self._emit("error", str(error), incident)
 
     def _return_home_after_save(self, page: Page, incident: str) -> None:
         home_spec = selectors.HOME_BUTTON
@@ -792,20 +788,6 @@ class AutomationWorker(threading.Thread):
                 )
             page.wait_for_timeout(min(250, remaining_ms))
             self._check_unexpected_ui(page)
-
-    def _capture_screenshot(self, incident: str) -> str | None:
-        page = self.latest_page
-        if page is None or page.is_closed():
-            return None
-        try:
-            SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
-            safe_incident = re.sub(r"[^A-Za-z0-9_-]", "_", incident)
-            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-            path = SCREENSHOT_DIR / f"{timestamp}_{safe_incident}.png"
-            page.screenshot(path=str(path), full_page=True, timeout=10_000)
-            return str(path)
-        except (OSError, PlaywrightError):
-            return None
 
     def _shutdown(self) -> None:
         if self.context is not None:

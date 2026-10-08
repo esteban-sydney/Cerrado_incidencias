@@ -26,7 +26,7 @@ El flujo permite elegir Grupo Resolutor y Usuario Resolutor y escribir una Resol
     └── ui.py
 ```
 
-En tiempo de ejecución se crean `browser_profile/`, `logs/` y `screenshots/`; están excluidos de Git porque contienen datos de sesión y operación.
+En tiempo de ejecución se crean `browser_profile/` y `logs/`; están excluidos de Git porque contienen datos de sesión y operación.
 
 ## Instalación y ejecución
 
@@ -108,6 +108,6 @@ En ese modo, el cierre debe desconectar Playwright sin cerrar el navegador que e
 - Se esperan hasta 90 segundos para cargar navegación y campos; el clic dispone de 30 segundos. Además hay pausas base configurables: 2 s tras cargar consola, 3 s tras seleccionar menú, 1.5 s tras escribir ID, 4 s tras Enter, 3.5 s tras abrir Redes Chile, 2.5 s después de Grupo, sin pausa después de Usuario, 1.5 s tras abrir Estado y 2.5 s después de elegir Cerrado. El valor de Usuario Resolutor se verifica inmediatamente y luego se inicia el paso de Estado.
 - Puedes ajustar los márgenes y timeouts en `helix_stage1/config.py` (`*_SETTLE_DELAY_MS`, `SPA_READY_TIMEOUT_MS`, `RESOLVER_FIELD_TIMEOUT_MS` y `MENU_CLICK_TIMEOUT_MS`). Son pausas de Playwright, no `time.sleep`; los locators siguen esperando hasta sus timeouts si Remedy necesita más tiempo.
 - Se comprueba que el campo visible contenga exactamente el número recibido desde Tkinter.
-- Ante error se intenta guardar una captura en `screenshots/` y se registra fecha, incidencia y resultado en `logs/automation.log`.
+- Ante error se registra fecha, incidencia y resultado en `logs/automation.log`. La aplicación no guarda capturas de pantalla automáticamente.
 - Si Helix redirige a login, autentícate manualmente. La herramienta no automatiza SSO.
 - El flujo termina tras enviar Guardar. La UI indica si detectó confirmación de Remedy; si no aparece, verifica el estado en Remedy antes de volver a ejecutar.
