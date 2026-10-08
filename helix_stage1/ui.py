@@ -48,8 +48,8 @@ class HelixApp:
         self.batch_results: list[tuple[str, BatchStatus, str]] = []
 
         root.title("Consulta de incidencias | BMC Helix")
-        root.geometry("320x240")
-        root.minsize(540, 480)
+        root.geometry("680x560")
+        root.minsize(620, 500)
         root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         style = ttk.Style(root)
@@ -67,7 +67,7 @@ class HelixApp:
         )
 
         assignment_frame = ttk.LabelFrame(
-            container, text="Datos comunes de cierre", style="Section.TLabelframe"
+            container, text="1. Datos comunes de cierre", style="Section.TLabelframe"
         )
         assignment_frame.grid(row=1, column=0, sticky="ew", pady=(14, 10))
         assignment_frame.columnconfigure(0, weight=1, uniform="common")
@@ -109,7 +109,7 @@ class HelixApp:
         modes_frame.columnconfigure(1, weight=1, uniform="mode")
 
         manual_frame = ttk.LabelFrame(
-            modes_frame, text="Cierre manual", style="Section.TLabelframe"
+            modes_frame, text="2A. Cierre manual", style="Section.TLabelframe"
         )
         manual_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
         manual_frame.columnconfigure(0, weight=1)
@@ -138,7 +138,7 @@ class HelixApp:
         self.search_button.grid(row=2, column=0, sticky="ew", padx=8, pady=(8, 8))
 
         excel_frame = ttk.LabelFrame(
-            modes_frame, text="Cierre masivo por Excel", style="Section.TLabelframe"
+            modes_frame, text="2B. Cierre masivo por Excel", style="Section.TLabelframe"
         )
         excel_frame.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
         excel_frame.columnconfigure(0, weight=1)
@@ -164,9 +164,20 @@ class HelixApp:
         ttk.Label(excel_frame, textvariable=self.excel_status_var, wraplength=260).grid(
             row=1, column=0, columnspan=2, sticky="ew", padx=8, pady=(0, 8)
         )
+        self.batch_progress_var = tk.StringVar(value="Sin proceso activo.")
+        self.batch_progress = ttk.Progressbar(
+            excel_frame,
+            mode="determinate",
+            maximum=1,
+            value=0,
+        )
+        self.batch_progress.grid(row=2, column=0, columnspan=2, sticky="ew", padx=8)
+        ttk.Label(excel_frame, textvariable=self.batch_progress_var, wraplength=260).grid(
+            row=3, column=0, columnspan=2, sticky="ew", padx=8, pady=(4, 8)
+        )
 
         self.status_var = tk.StringVar(value="Iniciando la interfaz…")
-        status_frame = ttk.LabelFrame(container, text="Estado", style="Section.TLabelframe")
+        status_frame = ttk.LabelFrame(container, text="3. Estado", style="Section.TLabelframe")
         status_frame.grid(row=3, column=0, sticky="ew", pady=(10, 10))
         status_frame.columnconfigure(0, weight=1)
         ttk.Label(
@@ -235,6 +246,8 @@ class HelixApp:
         except Exception as error:
             self.loaded_incidents = []
             self.excel_status_var.set("No se pudo cargar el Excel.")
+            self.batch_progress.configure(maximum=1, value=0)
+            self.batch_progress_var.set("Sin proceso activo.")
             self._set_idle_buttons()
             self._append_log(f"Error cargando Excel: {error}")
             return
@@ -244,6 +257,8 @@ class HelixApp:
         self.excel_status_var.set(
             f"{len(incidents)} cargadas. Listo para cierre masivo."
         )
+        self.batch_progress.configure(maximum=max(1, len(incidents)), value=0)
+        self.batch_progress_var.set(f"Pendientes: {len(incidents)}")
         self._set_idle_buttons()
         self._append_log(
             f"Excel cargado: {Path(path).name} | válidas: {len(incidents)} | "
@@ -417,6 +432,8 @@ class HelixApp:
         self.batch_running = True
         self.batch_index = 0
         self.batch_results = []
+        self.batch_progress.configure(maximum=len(self.loaded_incidents), value=0)
+        self.batch_progress_var.set(f"Procesando 0/{len(self.loaded_incidents)}")
         self._append_log(
             f"Inicio de proceso Excel: {len(self.loaded_incidents)} incidencias. "
             "Se ejecutarán una por una, volviendo a Inicio antes de continuar."
@@ -431,6 +448,9 @@ class HelixApp:
             return
 
         incident = self.loaded_incidents[self.batch_index]
+        self.batch_progress_var.set(
+            f"Procesando {self.batch_index + 1}/{len(self.loaded_incidents)}"
+        )
         self._append_log(
             f"Lote Excel {self.batch_index + 1}/{len(self.loaded_incidents)}: enviando {incident}."
         )
@@ -498,11 +518,15 @@ class HelixApp:
         finished_incident = incident or self.loaded_incidents[self.batch_index]
         self.batch_results.append((finished_incident, status, message))
         self.batch_index += 1
+        self.batch_progress.configure(value=self.batch_index)
         if status == "ERROR":
             self.batch_running = False
             report_path = self._write_batch_report()
             self.status_var.set(
                 f"Excel detenido en {finished_incident}. Revisa el error antes de continuar."
+            )
+            self.batch_progress_var.set(
+                f"Detenido: {self.batch_index}/{len(self.loaded_incidents)}"
             )
             self._append_log(
                 "Proceso Excel detenido por seguridad tras un error. "
@@ -525,6 +549,8 @@ class HelixApp:
         self.status_var.set(
             f"Excel finalizado: {ok_count} OK, {error_count} con error. Revisa el reporte."
         )
+        self.batch_progress.configure(value=len(self.loaded_incidents))
+        self.batch_progress_var.set(f"Finalizado: {ok_count} OK, {error_count} errores")
         self._append_log(f"Proceso Excel finalizado. Reporte generado: {report_path}")
         self._finish_current_operation()
         messagebox.showinfo(
