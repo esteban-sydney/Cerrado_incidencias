@@ -513,6 +513,11 @@ class HelixApp:
                     "Trabajo finalizado",
                     f"Cierre manual finalizado para {incident}.",
                 )
+            else:
+                messagebox.showerror(
+                    "Error en cierre manual",
+                    f"No se pudo completar {incident or 'la incidencia'}.\n\n{message}",
+                )
             return
 
         finished_incident = incident or self.loaded_incidents[self.batch_index]
@@ -533,6 +538,10 @@ class HelixApp:
                 f"Reporte parcial generado: {report_path}"
             )
             self._finish_current_operation()
+            messagebox.showerror(
+                "Cierre masivo detenido",
+                f"No se pudo completar {finished_incident}.\n\n{message}",
+            )
             return
 
         resolver_group = self.resolver_group_var.get()
@@ -596,7 +605,7 @@ class HelixApp:
             )
             self._handle_incident_finished(event.incident, "OK", event.message)
         elif event.kind == "error":
-            self.status_var.set("No se pudo completar la búsqueda. Revisa el log.")
+            self.status_var.set(f"No se pudo completar: {event.incident}.")
             self._handle_incident_finished(event.incident, "ERROR", event.message)
         elif event.kind == "closed":
             self.root.destroy()
