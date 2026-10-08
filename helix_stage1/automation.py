@@ -193,9 +193,36 @@ class AutomationWorker(threading.Thread):
         for index in range(dialogs.count()):
             dialog = dialogs.nth(index)
             if dialog.is_visible():
+                summary = self._summarize_visible_dialog(dialog)
                 raise UnexpectedModalError(
-                    "Helix muestra un diálogo/modal inesperado. No se realizó ninguna modificación."
+                    "Helix muestra un diálogo/modal inesperado. "
+                    "No se realizó ninguna modificación. "
+                    f"Detalle: {summary}"
                 )
+
+    def _summarize_visible_dialog(self, dialog: Locator) -> str:
+        try:
+            details = dialog.evaluate(
+                "element => ({"
+                "text: (element.innerText || '').trim(),"
+                "ariaLabel: element.getAttribute('aria-label') || '',"
+                "title: element.getAttribute('title') || '',"
+                "role: element.getAttribute('role') || ''"
+                "})"
+            )
+        except PlaywrightError:
+            return "No se pudo leer el contenido del modal."
+
+        parts = [
+            str(details.get("text") or "").strip(),
+            str(details.get("ariaLabel") or "").strip(),
+            str(details.get("title") or "").strip(),
+            str(details.get("role") or "").strip(),
+        ]
+        summary = " | ".join(part for part in parts if part)
+        if not summary:
+            return "Modal visible sin texto detectable."
+        return summary[:500]
 
     def _settle(self, page: Page, delay_ms: int, step: str, incident: str) -> None:
         if delay_ms <= 0:
