@@ -126,6 +126,7 @@ class AutomationWorker(threading.Thread):
             user_data_dir=str(BROWSER_PROFILE_DIR),
             channel="msedge",
             headless=False,
+            chromium_sandbox=True,
             viewport=None,
             args=["--start-maximized"],
             timeout=NAVIGATION_TIMEOUT_MS,
@@ -307,7 +308,7 @@ class AutomationWorker(threading.Thread):
                 raise AutomationError(
                     "Se pulsó 'Buscar incidencia', pero no apareció un campo editable para ingresar "
                     "el ID. Remedy puede haber recargado la incidencia anterior en lugar del formulario "
-                    "de búsqueda; revisa la captura y confirma que el botón Inicio dejó la consola lista."
+                    "de búsqueda; revisa el log y confirma que el botón Inicio dejó la consola lista."
                 ) from error
 
             self._check_unexpected_ui(search_page)
