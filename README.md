@@ -65,6 +65,14 @@ Tkinter suele venir incluido con Python para Windows. `playwright install msedge
 
 El botón de la UI se llama `Buscar incidencia`: navega al formulario, escribe el número, valida el valor y envía Enter. La pestaña queda abierta en la respuesta de Helix.
 
+## Carga y procesamiento de Excel
+
+La UI permite cargar archivos `.xlsx`, `.xlsm` u `.ods` con el botón `Cargar Excel`. La hoja activa debe tener una columna con cabecera `Incidencias`; la cabecera puede estar dentro de las primeras 10 filas. Cada valor se normaliza a mayúsculas y debe cumplir el formato `INC` seguido de 12 dígitos. Las filas vacías se omiten, los duplicados se cargan una sola vez y los valores inválidos se reportan en el log de Tkinter.
+
+Al cargar correctamente, la primera incidencia válida queda escrita en el campo `Número de incidencia` y se genera un TXT en `logs/` con columnas `numero de incidencia` y `Estado`; en ese resumen inicial `OK` significa incidencia válida cargada y `NOK` significa fila inválida o duplicada.
+
+El botón `Procesar Excel` ejecuta las incidencias cargadas una por una. La UI envía una incidencia al trabajador de Playwright, espera que termine con `searched` o `error`, registra el resultado y solo entonces inicia la siguiente. Si una incidencia falla, el lote se detiene por seguridad y genera un reporte parcial para evitar continuar sobre una pantalla posiblemente inconsistente. Durante cada incidencia se muestra `Automatización en proceso`; no manipules Remedy manualmente mientras ese mensaje esté activo, porque la automatización valida cada paso contra la pantalla esperada. Al finalizar el lote se genera un reporte `resultado_cierre_excel_*.txt` en `logs/`.
+
 ## Grupo y usuario resolutor
 
 Tkinter ofrece dos listas desplegables: `NOC 1L DX` y `NOC 1L TX`. Al elegir grupo, Usuario Resolutor queda limitado a los usuarios asociados a ese grupo; se debe escoger ambos antes de enviar la incidencia. El catálogo actual en `helix_stage1/resolver_catalog.py` refleja literalmente las capturas: 11 usuarios para DX y 9 para TX. Está aceptado como borrador y se puede corregir después.
@@ -73,7 +81,7 @@ El grupo, usuario y texto de Resolución elegidos en Tkinter viajan con la orden
 
 Para `Motivo del estado`, se usa el control observado `textarea[armenu="SYS:RSN:StatusReason-Q-HPD-HelpDesk"]`; el enlace hermano `a.btn.btn3d.menu` abre su lista. Se selecciona solo la opción visible exacta `Resolución autom. notificada` de `MenuTable` y se verifica el valor del textarea; después se escribe y verifica el textarea etiquetado `Resolución`.
 
-Al final se espera un único enlace accesible `Guardar` habilitado y se pulsa una sola vez. El flujo espera una respuesta y busca una confirmación visible de Remedy. Si no la detecta, informa que el clic fue enviado y no lo repite automáticamente; verifica Remedy antes de volver a ejecutar para evitar un guardado duplicado.
+Al final se espera el control `Guardar` de Remedy (`a[artype="Control"][arid="301614800"]`) habilitado y se pulsa una sola vez. El flujo espera una respuesta y busca una confirmación visible de Remedy. Si no la detecta, informa que el clic fue enviado y no lo repite automáticamente; verifica Remedy antes de volver a ejecutar para evitar un guardado duplicado. Si la página sigue abierta, después del guardado se pulsa `Inicio` (`a[artype="Control"][title="Inicio"]`) y se espera nuevamente el menú `Buscar incidencia` para dejar Remedy listo para la próxima búsqueda.
 
 ## SSO alternativo: Edge con depuración remota
 

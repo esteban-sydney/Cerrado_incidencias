@@ -34,6 +34,7 @@ from .config import (
     RESOLVER_FIELD_TIMEOUT_MS,
     RESOLVER_GROUP_SETTLE_DELAY_MS,
     RESOLVER_USER_SETTLE_DELAY_MS,
+    SAVE_TO_HOME_DELAY_MS,
     SPA_READY_TIMEOUT_MS,
     SCREENSHOT_DIR,
     SEARCH_ATTEMPTS,
@@ -139,6 +140,7 @@ class AutomationWorker(threading.Thread):
         self.console_page = pages[0] if pages else None
         if self.console_page is None:
             self.console_page = self.context.new_page()
+        self._install_page_handlers(self.console_page)
         for extra_page in pages[1:]:
             if not extra_page.is_closed():
                 extra_page.close()
@@ -294,14 +296,20 @@ class AutomationWorker(threading.Thread):
             self._ensure_session(search_page)
             search_field = search_spec.build(search_page)
             try:
-                self._emit("log", "Esperando el campo 'ID de la incidencia'…", incident)
-                search_field.wait_for(state="visible", timeout=SPA_READY_TIMEOUT_MS)
+                self._emit("log", "Esperando el campo editable 'ID de la incidencia'…", incident)
+                search_field = self._wait_for_single_editable_match(
+                    search_page,
+                    search_field,
+                    "el campo editable 'ID de la incidencia'",
+                    SPA_READY_TIMEOUT_MS,
+                    incident,
+                )
             except PlaywrightTimeoutError as error:
                 self._check_unexpected_ui(search_page)
                 raise AutomationError(
-                    "Se pulsó 'Buscar incidencia', pero no apareció el campo 'ID de la incidencia'. "
-                    "Remedy puede seguir cargando; revisa la captura y confirma que el atributo del "
-                    "menú corresponde a la opción de búsqueda."
+                    "Se pulsó 'Buscar incidencia', pero no apareció un campo editable para ingresar "
+                    "el ID. Remedy puede haber recargado la incidencia anterior en lugar del formulario "
+                    "de búsqueda; revisa la captura y confirma que el botón Inicio dejó la consola lista."
                 ) from error
 
             self._check_unexpected_ui(search_page)
@@ -538,7 +546,7 @@ class AutomationWorker(threading.Thread):
             save_button.wait_for(state="visible", timeout=RESOLVER_FIELD_TIMEOUT_MS)
             if save_button.count() != 1:
                 raise SelectorConfigurationError(
-                    f"Se esperaba un único enlace Guardar; encontré {save_button.count()}."
+                    f"Se esperaba un único control Guardar; encontré {save_button.count()}."
                 )
             if save_button.is_disabled():
                 raise AutomationError("El botón Guardar está deshabilitado; no se guardó.")
@@ -570,8 +578,13 @@ class AutomationWorker(threading.Thread):
                     )
 
             if not search_page.is_closed():
-                search_page.bring_to_front()
-                self.latest_page = search_page
+                self._settle(
+                    search_page,
+                    SAVE_TO_HOME_DELAY_MS,
+                    "el guardado antes de volver a Inicio",
+                    incident,
+                )
+                self._return_home_after_save(search_page, incident)
             result = (
                 "INCIDENCIA GUARDADA Y CONFIRMADA"
                 if save_confirmed
@@ -595,6 +608,33 @@ class AutomationWorker(threading.Thread):
             screenshot = self._capture_screenshot(incident)
             suffix = f" Captura: {screenshot}" if screenshot else " No se pudo guardar captura."
             self._emit("error", f"{error}{suffix}", incident)
+
+    def _return_home_after_save(self, page: Page, incident: str) -> None:
+        home_spec = selectors.HOME_BUTTON
+        menu_spec = selectors.OPEN_INCIDENT_SEARCH
+        assert home_spec is not None and menu_spec is not None
+
+        self._emit("log", "Volviendo a Inicio para dejar Remedy listo…", incident)
+        home_button = home_spec.build(page)
+        home_button.wait_for(state="visible", timeout=RESOLVER_FIELD_TIMEOUT_MS)
+        if home_button.count() != 1:
+            raise SelectorConfigurationError(
+                f"Se esperaba un único botón Inicio; encontré {home_button.count()}."
+            )
+        if home_button.is_disabled():
+            raise AutomationError("El botón Inicio está deshabilitado; no se pudo volver al inicio.")
+
+        home_button.click(timeout=MENU_CLICK_TIMEOUT_MS)
+        self._settle(page, CONSOLE_SETTLE_DELAY_MS, "la pantalla de inicio", incident)
+        self._emit("log", "Recargando la consola para iniciar desde cero…", incident)
+        page.goto(HELIX_URL, wait_until="domcontentloaded")
+        self._settle(page, CONSOLE_SETTLE_DELAY_MS, "la consola recargada", incident)
+
+        menu_item = menu_spec.build(page)
+        menu_item.wait_for(state="visible", timeout=SPA_READY_TIMEOUT_MS)
+        self.latest_page = page
+        self.console_page = page
+        self._emit("log", "Remedy quedó en Inicio y listo para una nueva búsqueda.", incident)
 
     def _fill_and_verify(
         self,
@@ -700,6 +740,55 @@ class AutomationWorker(threading.Thread):
             if remaining_ms <= 0:
                 raise PlaywrightTimeoutError(
                     f"Timeout esperando {description} visible tras {timeout_ms} ms."
+                )
+            page.wait_for_timeout(min(250, remaining_ms))
+            self._check_unexpected_ui(page)
+
+    def _wait_for_single_editable_match(
+        self,
+        page: Page,
+        locator: Locator,
+        description: str,
+        timeout_ms: int,
+        incident: str,
+    ) -> Locator:
+        deadline = monotonic() + timeout_ms / 1000
+        while True:
+            editable_matches: list[Locator] = []
+            for index in range(locator.count()):
+                candidate = locator.nth(index)
+                if not candidate.is_visible():
+                    continue
+                if candidate.evaluate(
+                    "element => !element.disabled && !element.readOnly && "
+                    "element.getAttribute('aria-disabled') !== 'true'"
+                ):
+                    editable_matches.append(candidate)
+
+            if len(editable_matches) == 1:
+                return editable_matches[0]
+            if len(editable_matches) > 1:
+                raise SelectorConfigurationError(
+                    f"{description} aparece como editable en {len(editable_matches)} controles; "
+                    "no seleccionaré entre campos ambiguos."
+                )
+
+            remaining_ms = int((deadline - monotonic()) * 1000)
+            if remaining_ms <= 0:
+                readonly_count = locator.evaluate_all(
+                    "elements => elements.filter(element => element.readOnly).length"
+                )
+                total_count = locator.count()
+                self.logger.warning(
+                    "%s no quedó editable para incidencia %s. total=%s readonly=%s",
+                    description,
+                    incident,
+                    total_count,
+                    readonly_count,
+                )
+                raise PlaywrightTimeoutError(
+                    f"Timeout esperando {description} editable tras {timeout_ms} ms. "
+                    f"Coincidencias: {total_count}; readonly: {readonly_count}."
                 )
             page.wait_for_timeout(min(250, remaining_ms))
             self._check_unexpected_ui(page)
