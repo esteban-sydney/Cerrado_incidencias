@@ -6,7 +6,8 @@ HELIX_URL = (
     "SHR%3ALandingConsole/Default+Administrator+View/"
 )
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-BROWSER_PROFILE_DIR = PROJECT_ROOT / "browser_profile"
+BROWSER_CHANNEL = "chrome"
+BROWSER_PROFILE_DIR = PROJECT_ROOT / "chrome_profile"
 LOG_DIR = PROJECT_ROOT / "logs"
 
 DEFAULT_TIMEOUT_MS = 60_000

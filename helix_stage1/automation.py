@@ -20,6 +20,7 @@ from playwright.sync_api import (
 
 from . import selectors
 from .config import (
+    BROWSER_CHANNEL,
     BROWSER_PROFILE_DIR,
     CONSOLE_SETTLE_DELAY_MS,
     DEFAULT_TIMEOUT_MS,
@@ -124,11 +125,15 @@ class AutomationWorker(threading.Thread):
         self.playwright = sync_playwright().start()
         self.context = self.playwright.chromium.launch_persistent_context(
             user_data_dir=str(BROWSER_PROFILE_DIR),
-            channel="msedge",
+            channel=BROWSER_CHANNEL,
             headless=False,
             chromium_sandbox=True,
             viewport=None,
-            args=["--start-maximized"],
+            args=[
+                "--start-maximized",
+                "--window-position=0,0",
+                "--window-size=1920,1080",
+            ],
             timeout=NAVIGATION_TIMEOUT_MS,
         )
         self.context.set_default_timeout(DEFAULT_TIMEOUT_MS)
@@ -140,10 +145,34 @@ class AutomationWorker(threading.Thread):
         if self.console_page is None:
             self.console_page = self.context.new_page()
         self._install_page_handlers(self.console_page)
+        self._maximize_page_window(self.console_page)
+        self._set_page_zoom(self.console_page, 0.9)
         for extra_page in pages[1:]:
             if not extra_page.is_closed():
                 extra_page.close()
         self.latest_page = self.console_page
+
+    def _maximize_page_window(self, page: Page) -> None:
+        if self.context is None:
+            return
+        try:
+            session = self.context.new_cdp_session(page)
+            window = session.send("Browser.getWindowForTarget")
+            session.send(
+                "Browser.setWindowBounds",
+                {
+                    "windowId": window["windowId"],
+                    "bounds": {"windowState": "maximized"},
+                },
+            )
+        except PlaywrightError as error:
+            self.logger.warning("No se pudo maximizar Edge automáticamente: %s", error)
+
+    def _set_page_zoom(self, page: Page, zoom: float) -> None:
+        try:
+            page.evaluate("zoom => { document.documentElement.style.zoom = String(zoom); }", zoom)
+        except PlaywrightError as error:
+            self.logger.warning("No se pudo ajustar zoom de Helix automáticamente: %s", error)
 
     def _handle_new_page(self, page: Page) -> None:
         if self.console_page is None:
@@ -231,6 +260,48 @@ class AutomationWorker(threading.Thread):
         page.wait_for_timeout(delay_ms)
         self._check_unexpected_ui(page)
 
+    def _center_locator(self, page: Page, locator: Locator, description: str, incident: str) -> None:
+        try:
+            locator.first.evaluate(
+                "element => element.scrollIntoView({block: 'center', inline: 'center'})"
+            )
+            page.wait_for_timeout(250)
+        except PlaywrightError as error:
+            self.logger.warning(
+                "No se pudo centrar %s para incidencia %s: %s",
+                description,
+                incident,
+                error,
+            )
+
+    def _scroll_remedy_down(
+        self,
+        page: Page,
+        incident: str,
+        section: str,
+        steps: int = 2,
+        delta_y: int = 450,
+    ) -> None:
+        try:
+            viewport = page.evaluate(
+                "() => ({width: window.innerWidth || 1200, height: window.innerHeight || 800})"
+            )
+            x = min(850, max(200, int(viewport["width"]) - 120))
+            y = min(560, max(220, int(viewport["height"]) - 180))
+            self._emit("log", f"Desplazando Remedy hacia {section}…", incident)
+            page.mouse.move(x, y)
+            for _ in range(steps):
+                page.mouse.wheel(0, delta_y)
+                page.wait_for_timeout(200)
+            self._check_unexpected_ui(page)
+        except PlaywrightError as error:
+            self.logger.warning(
+                "No se pudo desplazar Remedy hacia %s para incidencia %s: %s",
+                section,
+                incident,
+                error,
+            )
+
     def _navigate_to_console(self) -> None:
         if self.console_page is None:
             raise AutomationError("La página de Helix no está disponible.")
@@ -243,6 +314,7 @@ class AutomationWorker(threading.Thread):
             and current_url.path == target_url.path
         ):
             self.latest_page = self.console_page
+            self._set_page_zoom(self.console_page, 0.9)
             self._check_unexpected_ui(self.console_page)
             return
 
@@ -251,6 +323,7 @@ class AutomationWorker(threading.Thread):
             try:
                 self.console_page.goto(HELIX_URL, wait_until="domcontentloaded")
                 self.latest_page = self.console_page
+                self._set_page_zoom(self.console_page, 0.9)
                 self._check_unexpected_ui(self.console_page)
                 return
             except SessionExpiredError:
@@ -384,6 +457,7 @@ class AutomationWorker(threading.Thread):
             group_field = group_spec.build(search_page)
             self._emit("log", "Esperando el campo Grupo Resolutor…", incident)
             group_field.wait_for(state="visible", timeout=RESOLVER_FIELD_TIMEOUT_MS)
+            self._center_locator(search_page, group_field, "Grupo Resolutor", incident)
             self._fill_and_verify(
                 search_page,
                 group_field,
@@ -396,6 +470,7 @@ class AutomationWorker(threading.Thread):
             user_field = user_spec.build(search_page)
             self._emit("log", "Esperando el campo Usuario Resolutor…", incident)
             user_field.wait_for(state="visible", timeout=RESOLVER_FIELD_TIMEOUT_MS)
+            self._center_locator(search_page, user_field, "Usuario Resolutor", incident)
             self._fill_and_verify(
                 search_page,
                 user_field,
@@ -405,6 +480,7 @@ class AutomationWorker(threading.Thread):
                 incident,
             )
 
+            self._scroll_remedy_down(search_page, incident, "la sección Estado", steps=2)
             status_widget_spec = selectors.INCIDENT_STATUS_WIDGET
             closed_option_spec = selectors.CLOSED_STATUS_OPTION
             assert status_widget_spec is not None and closed_option_spec is not None
@@ -416,6 +492,7 @@ class AutomationWorker(threading.Thread):
                     "El atributo de Remedy para Estado debe identificar un único EnumSel; "
                     f"encontré {status_widget.count()}."
                 )
+            self._center_locator(search_page, status_widget, "Estado", incident)
             status_selection = status_widget.locator("div.selection")
             self._emit("log", "Esperando el control visible del campo Estado…", incident)
             status_selection.wait_for(state="visible", timeout=RESOLVER_FIELD_TIMEOUT_MS)
@@ -555,7 +632,9 @@ class AutomationWorker(threading.Thread):
             assert resolution_spec is not None
             resolution_field = resolution_spec.build(search_page)
             self._emit("log", "Esperando el campo Resolución…", incident)
+            self._scroll_remedy_down(search_page, incident, "la sección Resolución", steps=1)
             resolution_field.wait_for(state="visible", timeout=RESOLVER_FIELD_TIMEOUT_MS)
+            self._center_locator(search_page, resolution_field, "Resolución", incident)
             self._fill_and_verify(
                 search_page,
                 resolution_field,
@@ -652,6 +731,7 @@ class AutomationWorker(threading.Thread):
         self._settle(page, CONSOLE_SETTLE_DELAY_MS, "la pantalla de inicio", incident)
         self._emit("log", "Recargando la consola para iniciar desde cero…", incident)
         page.goto(HELIX_URL, wait_until="domcontentloaded")
+        self._set_page_zoom(page, 0.9)
         self._settle(page, CONSOLE_SETTLE_DELAY_MS, "la consola recargada", incident)
 
         menu_item = menu_spec.build(page)
