@@ -6,3 +6,5 @@ browser_profile/
 chrome_profile/
 logs/
 screenshots/
+helix_stage1/local_settings.py
+resolver_catalog.local.json

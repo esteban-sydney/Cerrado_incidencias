@@ -378,6 +378,10 @@ class AutomationWorker(threading.Thread):
                 raise AutomationError("Selecciona un Grupo Resolutor y un Usuario Resolutor.")
             if not resolution or not resolution.strip():
                 raise AutomationError("Ingresa el texto de Resolución en Tkinter.")
+            if not HELIX_URL:
+                raise AutomationError(
+                    "Configura HELIX_URL en helix_stage1/local_settings.py antes de ejecutar."
+                )
             self._validate_selectors()
             self._ensure_browser()
             self._navigate_to_console()
