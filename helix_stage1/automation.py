@@ -21,6 +21,7 @@ from playwright.sync_api import (
 from . import selectors
 from .config import (
     BROWSER_CHANNEL,
+    BROWSER_SCALE_FACTOR,
     BROWSER_PROFILE_DIR,
     CONSOLE_SETTLE_DELAY_MS,
     DEFAULT_TIMEOUT_MS,
@@ -81,7 +82,7 @@ class UnexpectedModalError(AutomationError):
 
 
 class AutomationWorker(threading.Thread):
-    """Único hilo propietario de Playwright, Edge y sus páginas."""
+    """Único hilo propietario de Playwright, el navegador y sus páginas."""
 
     def __init__(
         self,
@@ -100,12 +101,15 @@ class AutomationWorker(threading.Thread):
         self._dialog_messages: list[str] = []
 
     def run(self) -> None:
-        self._emit("ready", "UI lista. Edge se abrirá cuando envíes una incidencia.")
+        self._emit("ready", "UI lista. El navegador se abrirá cuando envíes una incidencia.")
         try:
             while True:
                 command = self.commands.get()
                 if command.action == "stop":
                     break
+                if command.action == "search" and not command.incident:
+                    self._emit("error", "Comando de búsqueda sin número de incidencia.")
+                    continue
                 if command.action == "search" and command.incident:
                     self._process_incident(
                         command.incident,
@@ -123,17 +127,18 @@ class AutomationWorker(threading.Thread):
     def _start_browser(self) -> None:
         BROWSER_PROFILE_DIR.mkdir(parents=True, exist_ok=True)
         self.playwright = sync_playwright().start()
+        launch_args = ["--start-maximized"]
+        if BROWSER_SCALE_FACTOR != 1.0:
+            launch_args.append(f"--force-device-scale-factor={BROWSER_SCALE_FACTOR}")
+        # IMPORTANTE: en Playwright Python `viewport=None` equivale a NO indicarlo y Playwright
+        # emula 1280x720. Para usar todo el tamaño real de la ventana hay que usar no_viewport=True.
         self.context = self.playwright.chromium.launch_persistent_context(
             user_data_dir=str(BROWSER_PROFILE_DIR),
             channel=BROWSER_CHANNEL,
             headless=False,
             chromium_sandbox=True,
-            viewport=None,
-            args=[
-                "--start-maximized",
-                "--window-position=0,0",
-                "--window-size=1920,1080",
-            ],
+            no_viewport=True,
+            args=launch_args,
             timeout=NAVIGATION_TIMEOUT_MS,
         )
         self.context.set_default_timeout(DEFAULT_TIMEOUT_MS)
@@ -146,11 +151,20 @@ class AutomationWorker(threading.Thread):
             self.console_page = self.context.new_page()
         self._install_page_handlers(self.console_page)
         self._maximize_page_window(self.console_page)
-        self._set_page_zoom(self.console_page, 0.9)
         for extra_page in pages[1:]:
             if not extra_page.is_closed():
                 extra_page.close()
         self.latest_page = self.console_page
+
+    def _ensure_browser(self) -> None:
+        """Abre el navegador o lo reabre si el usuario lo cerró manualmente."""
+        if self.context is not None:
+            page = self.console_page
+            if page is None or page.is_closed():
+                self.logger.warning("El navegador/pestaña fue cerrado; se reabrirá.")
+                self._shutdown()
+        if self.context is None:
+            self._start_browser()
 
     def _maximize_page_window(self, page: Page) -> None:
         if self.context is None:
@@ -166,13 +180,14 @@ class AutomationWorker(threading.Thread):
                 },
             )
         except PlaywrightError as error:
-            self.logger.warning("No se pudo maximizar Edge automáticamente: %s", error)
+            self.logger.warning("No se pudo maximizar el navegador automáticamente: %s", error)
 
-    def _set_page_zoom(self, page: Page, zoom: float) -> None:
+    def _refresh_layout(self, page: Page) -> None:
+        """Pide a Remedy recalcular su layout con el tamaño real de la ventana."""
         try:
-            page.evaluate("zoom => { document.documentElement.style.zoom = String(zoom); }", zoom)
+            page.evaluate("() => window.dispatchEvent(new Event('resize'))")
         except PlaywrightError as error:
-            self.logger.warning("No se pudo ajustar zoom de Helix automáticamente: %s", error)
+            self.logger.warning("No se pudo refrescar el layout de Helix: %s", error)
 
     def _handle_new_page(self, page: Page) -> None:
         if self.console_page is None:
@@ -182,7 +197,7 @@ class AutomationWorker(threading.Thread):
         if page is self.console_page:
             self._install_page_handlers(page)
             return
-        self.logger.info("Cierro una pestaña emergente para mantener una sola ventana Edge: %s", page.url)
+        self.logger.info("Cierro una pestaña emergente para mantener una sola ventana del navegador: %s", page.url)
         try:
             page.close()
         except PlaywrightError:
@@ -206,7 +221,7 @@ class AutomationWorker(threading.Thread):
         if any(token in path for token in ("/login", "login.jsp", "/sso/", "authentication")):
             raise SessionExpiredError(
                 "Helix redirigió a autenticación. No se automatiza el login: inicia sesión "
-                "manualmente en Edge y vuelve a buscar, o consulta la alternativa CDP del README."
+                "manualmente en el navegador y vuelve a buscar, o consulta la alternativa CDP del README."
             )
 
     def _check_unexpected_ui(self, page: Page) -> None:
@@ -314,7 +329,7 @@ class AutomationWorker(threading.Thread):
             and current_url.path == target_url.path
         ):
             self.latest_page = self.console_page
-            self._set_page_zoom(self.console_page, 0.9)
+            self._refresh_layout(self.console_page)
             self._check_unexpected_ui(self.console_page)
             return
 
@@ -323,7 +338,7 @@ class AutomationWorker(threading.Thread):
             try:
                 self.console_page.goto(HELIX_URL, wait_until="domcontentloaded")
                 self.latest_page = self.console_page
-                self._set_page_zoom(self.console_page, 0.9)
+                self._refresh_layout(self.console_page)
                 self._check_unexpected_ui(self.console_page)
                 return
             except SessionExpiredError:
@@ -364,8 +379,7 @@ class AutomationWorker(threading.Thread):
             if not resolution or not resolution.strip():
                 raise AutomationError("Ingresa el texto de Resolución en Tkinter.")
             self._validate_selectors()
-            if self.context is None:
-                self._start_browser()
+            self._ensure_browser()
             self._navigate_to_console()
             console_page = self.console_page
             if console_page is None:
@@ -731,7 +745,7 @@ class AutomationWorker(threading.Thread):
         self._settle(page, CONSOLE_SETTLE_DELAY_MS, "la pantalla de inicio", incident)
         self._emit("log", "Recargando la consola para iniciar desde cero…", incident)
         page.goto(HELIX_URL, wait_until="domcontentloaded")
-        self._set_page_zoom(page, 0.9)
+        self._refresh_layout(page)
         self._settle(page, CONSOLE_SETTLE_DELAY_MS, "la consola recargada", incident)
 
         menu_item = menu_spec.build(page)
@@ -754,7 +768,7 @@ class AutomationWorker(threading.Thread):
         field.focus()
         self._settle(page, settle_delay_ms, field_name, incident)
         actual_value = field.input_value(timeout=DEFAULT_TIMEOUT_MS).strip()
-        if actual_value.casefold() != expected_value.strip().casefold():
+        if " ".join(actual_value.split()).casefold() != " ".join(expected_value.split()).casefold():
             raise VerificationError(
                 f"{field_name} quedó como '{actual_value}', se esperaba '{expected_value}'."
             )
