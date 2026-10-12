@@ -52,6 +52,7 @@ class WorkerCommand:
     resolver_group: str | None = None
     resolver_user: str | None = None
     resolution: str | None = None
+    close_tasks: bool = False
 
 
 @dataclass(frozen=True)
@@ -116,6 +117,7 @@ class AutomationWorker(threading.Thread):
                         command.resolver_group,
                         command.resolver_user,
                         command.resolution,
+                        command.close_tasks,
                     )
         except Exception as error:
             self.logger.exception("Fallo no recuperable del trabajador de Playwright")
@@ -370,6 +372,7 @@ class AutomationWorker(threading.Thread):
         resolver_group: str | None,
         resolver_user: str | None,
         resolution: str | None,
+        close_tasks: bool,
     ) -> None:
         self._emit("log", f"Abriendo Buscar incidencia para {incident}…", incident)
         result = "ERROR"
@@ -443,6 +446,9 @@ class AutomationWorker(threading.Thread):
             search_field.press("Enter")
             self._settle(search_page, RESULT_SETTLE_DELAY_MS, "los resultados de búsqueda", incident)
 
+            if close_tasks:
+                self._close_pending_tasks(search_page, incident)
+
             tab_spec = selectors.NETWORKS_CHILE_TAB
             group_spec = selectors.RESOLVER_GROUP_FIELD
             user_spec = selectors.RESOLVER_USER_FIELD
@@ -504,12 +510,7 @@ class AutomationWorker(threading.Thread):
             assert status_widget_spec is not None and closed_option_spec is not None
             status_widget = status_widget_spec.build(search_page)
             self._emit("log", "Esperando que el widget Estado esté en el DOM…", incident)
-            status_widget.wait_for(state="attached", timeout=RESOLVER_FIELD_TIMEOUT_MS)
-            if status_widget.count() != 1:
-                raise SelectorConfigurationError(
-                    "El atributo de Remedy para Estado debe identificar un único EnumSel; "
-                    f"encontré {status_widget.count()}."
-                )
+            status_widget = self._incident_status_widget(search_page, status_widget, incident)
             self._center_locator(search_page, status_widget, "Estado", incident)
             status_selection = status_widget.locator("div.selection")
             self._emit("log", "Esperando el control visible del campo Estado…", incident)
@@ -729,6 +730,286 @@ class AutomationWorker(threading.Thread):
         except Exception as error:
             self.logger.exception("Fallo procesando incidencia=%s resultado=%s", incident, result)
             self._emit("error", str(error), incident)
+
+    def _incident_status_widget(self, page: Page, locator: Locator, incident: str) -> Locator:
+        visible_status_widgets = self._wait_for_visible_locator_matches(
+            page,
+            locator,
+            "el Estado visible de la incidencia",
+            RESOLVER_FIELD_TIMEOUT_MS,
+            incident,
+        )
+        if len(visible_status_widgets) == 1:
+            return visible_status_widgets[0]
+
+        candidates: list[tuple[int, Locator, str]] = []
+        for widget in visible_status_widgets:
+            details = widget.evaluate(
+                "element => ({"
+                "arwindowid: element.getAttribute('arwindowid') || '',"
+                "id: element.id || '',"
+                "text: (element.innerText || '').trim()"
+                "})"
+            )
+            raw_window = str(details.get("arwindowid") or "")
+            try:
+                window_id = int(raw_window)
+            except ValueError:
+                window_id = 9999
+            candidates.append((window_id, widget, str(details)))
+
+        candidates.sort(key=lambda item: item[0])
+        self.logger.info(
+            "Se encontraron %s widgets Estado visibles para %s; se usará arwindowid menor. Detalle=%s",
+            len(visible_status_widgets),
+            incident,
+            [detail for _window_id, _widget, detail in candidates],
+        )
+        return candidates[0][1]
+
+    def _close_pending_tasks(self, page: Page, incident: str) -> None:
+        tasks_tab_spec = selectors.TASKS_TAB
+        task_view_spec = selectors.TASK_VIEW_BUTTON
+        assert tasks_tab_spec is not None and task_view_spec is not None
+
+        self._emit("log", "Validando tareas asociadas antes de Redes Chile…", incident)
+        self._open_tasks_tab(page, incident)
+
+        closed_count = 0
+        for _attempt in range(10):
+            pending_task = self._first_pending_task(page, incident)
+            if pending_task is None:
+                if closed_count:
+                    self._emit(
+                        "log",
+                        f"Tareas pendientes cerradas: {closed_count}. Continuando con Redes Chile.",
+                        incident,
+                    )
+                return
+
+            task_id = str(pending_task["task_id"])
+            state = str(pending_task["state"])
+            row = pending_task["row"]
+            self._emit(
+                "log",
+                f"Tarea {task_id} en estado '{state}'. Abriendo para cerrar…",
+                incident,
+            )
+            if not hasattr(row, "click"):
+                raise AutomationError("No se pudo identificar la fila de tarea pendiente.")
+            row.click(timeout=MENU_CLICK_TIMEOUT_MS)
+            self._settle(page, FIELD_SETTLE_DELAY_MS, f"la selección de tarea {task_id}", incident)
+
+            view_button = task_view_spec.build(page)
+            view_button.wait_for(state="visible", timeout=RESOLVER_FIELD_TIMEOUT_MS)
+            if view_button.count() != 1:
+                raise SelectorConfigurationError(
+                    f"Se esperaba un único botón Ver de tareas; encontré {view_button.count()}."
+                )
+            if view_button.is_disabled():
+                raise AutomationError("El botón Ver de tareas está deshabilitado.")
+
+            view_button.click(timeout=MENU_CLICK_TIMEOUT_MS)
+            self._settle(page, MENU_SETTLE_DELAY_MS, f"la pantalla de tarea {task_id}", incident)
+            self._close_current_task(page, incident, task_id)
+            closed_count += 1
+            self._return_to_incident_from_task(page, incident, task_id)
+            self._settle(page, NETWORKS_TAB_SETTLE_DELAY_MS, "la incidencia tras cerrar tarea", incident)
+            self._open_tasks_tab(page, incident)
+        raise AutomationError(
+            "Se intentaron cerrar demasiadas tareas en una misma incidencia; proceso detenido por seguridad."
+        )
+
+    def _open_tasks_tab(self, page: Page, incident: str) -> None:
+        tasks_tab_spec = selectors.TASKS_TAB
+        assert tasks_tab_spec is not None
+
+        tasks_tab = tasks_tab_spec.build(page).filter(
+            has_text=re.compile(r"^\s*Tareas\s*$", re.IGNORECASE)
+        )
+        tasks_tab.first.wait_for(state="visible", timeout=SPA_READY_TIMEOUT_MS)
+        visible_tabs = [
+            tasks_tab.nth(index)
+            for index in range(tasks_tab.count())
+            if tasks_tab.nth(index).is_visible()
+        ]
+        if len(visible_tabs) != 1:
+            raise SelectorConfigurationError(
+                "Se esperaba una única pestaña visible 'Tareas'; "
+                f"se encontraron {len(visible_tabs)}."
+            )
+        visible_tabs[0].click(timeout=MENU_CLICK_TIMEOUT_MS)
+        self._settle(page, NETWORKS_TAB_SETTLE_DELAY_MS, "la pestaña Tareas", incident)
+
+    def _first_pending_task(self, page: Page, incident: str) -> dict[str, object] | None:
+        task_rows = page.locator("tr").filter(has_text=re.compile(r"TAS\d+", re.IGNORECASE))
+        rows: list[tuple[Locator, str, str, str]] = []
+        for index in range(task_rows.count()):
+            row = task_rows.nth(index)
+            if not row.is_visible():
+                continue
+            text = " ".join((row.inner_text(timeout=DEFAULT_TIMEOUT_MS) or "").split())
+            task_match = re.search(r"TAS\d+", text, re.IGNORECASE)
+            if task_match is None:
+                continue
+            task_id = task_match.group(0).upper()
+            state = self._extract_task_state(text)
+            rows.append((row, task_id, state, text))
+
+        if not rows:
+            self._emit("log", "No se encontraron tareas asociadas.", incident)
+            return None
+
+        pending = [
+            (row, task_id, state, text)
+            for row, task_id, state, text in rows
+            if state.casefold() not in {"cerrado", "closed"}
+        ]
+        if not pending:
+            self._emit("log", f"Tareas asociadas ya cerradas: {len(rows)}.", incident)
+            return None
+
+        row, task_id, state, text = pending[0]
+        self.logger.info(
+            "Tarea pendiente para incidencia %s: task_id=%s estado=%r fila=%r",
+            incident,
+            task_id,
+            state,
+            text,
+        )
+        return {"row": row, "task_id": task_id, "state": state}
+
+    @staticmethod
+    def _extract_task_state(row_text: str) -> str:
+        known_states = (
+            "Cerrado",
+            "Asignado",
+            "Pendiente",
+            "Trabajo en curso",
+            "En curso",
+            "Esperando",
+            "Omitido",
+        )
+        normalized = " ".join(row_text.split())
+        for state in known_states:
+            if re.search(rf"(?<!\w){re.escape(state)}(?!\w)", normalized, re.IGNORECASE):
+                return state
+        return "desconocido"
+
+    def _close_current_task(self, page: Page, incident: str, task_id: str) -> None:
+        task_status_spec = selectors.TASK_STATUS_WIDGET
+        closed_option_spec = selectors.CLOSED_STATUS_OPTION
+        task_save_spec = selectors.TASK_SAVE_BUTTON
+        assert task_status_spec is not None and closed_option_spec is not None and task_save_spec is not None
+
+        status_widget = task_status_spec.build(page)
+        self._emit("log", f"Esperando Estado de tarea {task_id}…", incident)
+        visible_status_widgets = self._wait_for_visible_locator_matches(
+            page,
+            status_widget,
+            "el Estado visible de la tarea",
+            RESOLVER_FIELD_TIMEOUT_MS,
+            incident,
+        )
+        if len(visible_status_widgets) != 1:
+            raise SelectorConfigurationError(
+                "La pantalla de tarea debe tener un único Estado visible; "
+                f"encontré {len(visible_status_widgets)}."
+            )
+        status_widget = visible_status_widgets[0]
+        self._center_locator(page, status_widget, f"Estado de tarea {task_id}", incident)
+        status_selection = status_widget.locator("div.selection")
+        status_field = status_selection.locator("input")
+        status_toggle = status_selection.locator("a.selectionbtn")
+        status_field.wait_for(state="visible", timeout=RESOLVER_FIELD_TIMEOUT_MS)
+        status_toggle.wait_for(state="visible", timeout=RESOLVER_FIELD_TIMEOUT_MS)
+
+        status_before = (status_field.input_value(timeout=DEFAULT_TIMEOUT_MS) or "").strip()
+        if status_before.casefold() in {"cerrado", "closed"}:
+            self._emit("log", f"Tarea {task_id} ya está Cerrado; no se modifica.", incident)
+            return
+
+        self._emit("log", f"Cambiando tarea {task_id} de '{status_before}' a Cerrado…", incident)
+        status_toggle.click(timeout=MENU_CLICK_TIMEOUT_MS)
+        self._settle(page, STATUS_MENU_SETTLE_DELAY_MS, f"las opciones Estado de tarea {task_id}", incident)
+        closed_option = closed_option_spec.build(page).filter(
+            has_text=re.compile(r"^\s*Cerrado\s*$", re.IGNORECASE)
+        )
+        closed_option_visible = self._wait_for_single_visible_match(
+            page,
+            closed_option,
+            "la opción exacta 'Cerrado' de la tarea",
+            RESOLVER_FIELD_TIMEOUT_MS,
+            incident,
+        )
+        closed_option_visible.click(timeout=MENU_CLICK_TIMEOUT_MS)
+        self._settle(page, STATUS_SETTLE_DELAY_MS, f"Estado Cerrado de tarea {task_id}", incident)
+        status_value = (status_field.input_value(timeout=DEFAULT_TIMEOUT_MS) or "").strip()
+        status_title = (status_field.get_attribute("title") or "").strip()
+        if not {status_value.casefold(), status_title.casefold()} & {"cerrado", "closed"}:
+            raise VerificationError(
+                f"Estado de tarea {task_id} no quedó en 'Cerrado'. "
+                f"Valor detectado: '{status_value or status_title}'."
+            )
+
+        save_button = task_save_spec.build(page)
+        self._emit("log", f"Guardando tarea {task_id}…", incident)
+        save_button.wait_for(state="visible", timeout=RESOLVER_FIELD_TIMEOUT_MS)
+        if save_button.count() != 1:
+            raise SelectorConfigurationError(
+                f"Se esperaba un único botón Guardar de tarea; encontré {save_button.count()}."
+            )
+        if save_button.is_disabled():
+            raise AutomationError(f"El botón Guardar de tarea {task_id} está deshabilitado.")
+        save_button.click(timeout=MENU_CLICK_TIMEOUT_MS)
+        self._settle(page, RESULT_SETTLE_DELAY_MS, f"el guardado de tarea {task_id}", incident)
+        self._emit("log", f"Tarea {task_id} guardada como Cerrado.", incident)
+
+    def _wait_for_visible_locator_matches(
+        self,
+        page: Page,
+        locator: Locator,
+        description: str,
+        timeout_ms: int,
+        incident: str,
+    ) -> list[Locator]:
+        deadline = monotonic() + timeout_ms / 1000
+        while True:
+            visible_matches = [
+                locator.nth(index)
+                for index in range(locator.count())
+                if locator.nth(index).is_visible()
+            ]
+            if visible_matches:
+                return visible_matches
+
+            remaining_ms = int((deadline - monotonic()) * 1000)
+            if remaining_ms <= 0:
+                raise PlaywrightTimeoutError(
+                    f"Timeout esperando {description} visible tras {timeout_ms} ms."
+                )
+            page.wait_for_timeout(min(250, remaining_ms))
+            self._check_unexpected_ui(page)
+
+    def _return_to_incident_from_task(self, page: Page, incident: str, task_id: str) -> None:
+        breadcrumb_spec = selectors.TASK_INCIDENT_BREADCRUMB
+        assert breadcrumb_spec is not None
+
+        breadcrumb = breadcrumb_spec.build(page)
+        self._emit("log", f"Volviendo desde tarea {task_id} a Incidencia (Buscar)…", incident)
+        breadcrumb.wait_for(state="visible", timeout=RESOLVER_FIELD_TIMEOUT_MS)
+        visible_links = [
+            breadcrumb.nth(index)
+            for index in range(breadcrumb.count())
+            if breadcrumb.nth(index).is_visible()
+        ]
+        if len(visible_links) != 1:
+            raise SelectorConfigurationError(
+                "Se esperaba un único breadcrumb 'Incidencia (Buscar)'; "
+                f"se encontraron {len(visible_links)}."
+            )
+        visible_links[0].click(timeout=MENU_CLICK_TIMEOUT_MS)
+        self._settle(page, RESULT_SETTLE_DELAY_MS, "la vuelta a Incidencia (Buscar)", incident)
 
     def _return_home_after_save(self, page: Page, incident: str) -> None:
         home_spec = selectors.HOME_BUTTON

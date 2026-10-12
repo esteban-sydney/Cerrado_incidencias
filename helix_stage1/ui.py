@@ -77,6 +77,7 @@ class HelixApp:
         self._last_incident_text = ""
         self._updating_incident = False
         self._close_requested_at = 0.0
+        self.close_tasks_var = tk.BooleanVar(value=False)
 
         root.title("Cierre de incidencias | BMC Helix")
         root.geometry("980x860")
@@ -213,6 +214,15 @@ class HelixApp:
             font=self.font_status,
         )
         self.search_button.grid(row=2, column=0, sticky="ew", padx=8, pady=(0, 8))
+        self.close_tasks_check_manual = ctk.CTkCheckBox(
+            manual_tab,
+            text="Cerrar tareas asociadas antes del cierre",
+            variable=self.close_tasks_var,
+            font=self.font_body,
+        )
+        self.close_tasks_check_manual.grid(
+            row=3, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 4)
+        )
 
         # --- Excel
         ctk.CTkLabel(
@@ -247,20 +257,29 @@ class HelixApp:
             font=self.font_status,
         )
         self.process_excel_button.grid(row=1, column=1, sticky="ew", padx=(4, 8), pady=(0, 8))
+        self.close_tasks_check = ctk.CTkCheckBox(
+            excel_tab,
+            text="Cerrar tareas asociadas antes del cierre",
+            variable=self.close_tasks_var,
+            font=self.font_body,
+        )
+        self.close_tasks_check.grid(
+            row=2, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 4)
+        )
         self.excel_status_var = tk.StringVar(value="Sin Excel cargado.")
         ctk.CTkLabel(excel_tab, textvariable=self.excel_status_var, font=self.font_body).grid(
-            row=2, column=0, columnspan=2, sticky="w", padx=8
+            row=3, column=0, columnspan=2, sticky="w", padx=8
         )
         self.batch_progress = ctk.CTkProgressBar(excel_tab, height=10)
         self.batch_progress.set(0)
-        self.batch_progress.grid(row=3, column=0, columnspan=2, sticky="ew", padx=8, pady=(6, 2))
+        self.batch_progress.grid(row=4, column=0, columnspan=2, sticky="ew", padx=8, pady=(6, 2))
         self.batch_progress_var = tk.StringVar(value="Sin proceso activo.")
         ctk.CTkLabel(
             excel_tab,
             textvariable=self.batch_progress_var,
             font=self.font_subtitle,
             text_color=("gray35", "gray65"),
-        ).grid(row=4, column=0, columnspan=2, sticky="w", padx=8)
+        ).grid(row=5, column=0, columnspan=2, sticky="w", padx=8)
 
     def _build_status_card(self, container: ctk.CTkFrame) -> None:
         card = self._card(container)
@@ -552,6 +571,7 @@ class HelixApp:
                 resolver_group=resolver_group,
                 resolver_user=resolver_user,
                 resolution=resolution,
+                close_tasks=self.close_tasks_var.get(),
             )
         )
 
@@ -560,6 +580,8 @@ class HelixApp:
         state = "disabled" if self.closing else "normal"
         self.search_button.configure(state=state)
         self.load_excel_button.configure(state=state)
+        self.close_tasks_check.configure(state=state)
+        self.close_tasks_check_manual.configure(state=state)
         self.process_excel_button.configure(
             state="normal" if state == "normal" and self.loaded_records else "disabled"
         )
@@ -567,6 +589,8 @@ class HelixApp:
     def _set_busy_buttons(self) -> None:
         self.search_button.configure(state="disabled")
         self.load_excel_button.configure(state="disabled")
+        self.close_tasks_check.configure(state="disabled")
+        self.close_tasks_check_manual.configure(state="disabled")
         self.process_excel_button.configure(state="disabled")
 
     def _finish_current_operation(self) -> None:

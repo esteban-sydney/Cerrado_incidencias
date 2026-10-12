@@ -78,6 +78,19 @@ STATUS_REASON_TOGGLE_SELECTOR = (
 STATUS_REASON_OPTION: LocatorSpec | None = LocatorSpec(
     "css", "table.MenuTable tr.MenuTableRow td.MenuEntryName"
 )
+TASKS_TAB: LocatorSpec | None = LocatorSpec("css", "a.btn.f1:visible")
+TASK_VIEW_BUTTON: LocatorSpec | None = LocatorSpec(
+    "css", 'a[ardbn="z3Btn_TaskView"][arid="303518600"][artype="Control"]'
+)
+TASK_STATUS_WIDGET: LocatorSpec | None = LocatorSpec(
+    "css", '[ardbn="Status"][artype="EnumSel"]'
+)
+TASK_SAVE_BUTTON: LocatorSpec | None = LocatorSpec(
+    "css", 'a[ardbn="z3Btn_Save"][arid="300000300"][artype="Control"]'
+)
+TASK_INCIDENT_BREADCRUMB: LocatorSpec | None = LocatorSpec(
+    "css", 'a.btn:has-text("Incidencia (Buscar)")'
+)
 RESULT_ROW: LocatorSpec | None = None
 INCIDENT_NUMBER_FIELD: LocatorSpec | None = None
 
@@ -98,6 +111,11 @@ def missing_selector_names() -> list[str]:
             ("CLOSED_STATUS_OPTION", CLOSED_STATUS_OPTION),
             ("STATUS_REASON_WIDGET", STATUS_REASON_WIDGET),
             ("STATUS_REASON_OPTION", STATUS_REASON_OPTION),
+            ("TASKS_TAB", TASKS_TAB),
+            ("TASK_VIEW_BUTTON", TASK_VIEW_BUTTON),
+            ("TASK_STATUS_WIDGET", TASK_STATUS_WIDGET),
+            ("TASK_SAVE_BUTTON", TASK_SAVE_BUTTON),
+            ("TASK_INCIDENT_BREADCRUMB", TASK_INCIDENT_BREADCRUMB),
         )
         if spec is None
     ]
