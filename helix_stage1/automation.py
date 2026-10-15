@@ -23,14 +23,23 @@ from .config import (
     BROWSER_CHANNEL,
     BROWSER_SCALE_FACTOR,
     BROWSER_PROFILE_DIR,
+    CATEGORIZATION_TAB_SETTLE_DELAY_MS,
+    COMPANY_KEYSTROKE_DELAY_MS,
+    COMPANY_SETTLE_DELAY_MS,
     CONSOLE_SETTLE_DELAY_MS,
+    CUSTOMER_KEYSTROKE_DELAY_MS,
+    CUSTOMER_SUGGESTION_DELAY_MS,
     DEFAULT_TIMEOUT_MS,
     FIELD_SETTLE_DELAY_MS,
+    FAILURE_CONDITION_MENU_SETTLE_DELAY_MS,
+    FAILURE_CONDITION_SETTLE_DELAY_MS,
     HELIX_URL,
     MENU_CLICK_TIMEOUT_MS,
     MENU_SETTLE_DELAY_MS,
     NAVIGATION_TIMEOUT_MS,
     NETWORKS_TAB_SETTLE_DELAY_MS,
+    NEW_INCIDENT_TEXT_KEYSTROKE_DELAY_MS,
+    NEW_INCIDENT_TEXT_SETTLE_DELAY_MS,
     RESULT_SETTLE_DELAY_MS,
     RESOLVER_FIELD_TIMEOUT_MS,
     RESOLVER_GROUP_SETTLE_DELAY_MS,
@@ -42,6 +51,8 @@ from .config import (
     STATUS_REASON_MENU_SETTLE_DELAY_MS,
     STATUS_REASON_SETTLE_DELAY_MS,
     STATUS_SETTLE_DELAY_MS,
+    TEMPLATE_KEYSTROKE_DELAY_MS,
+    TEMPLATE_SUGGESTION_DELAY_MS,
 )
 
 
@@ -49,6 +60,8 @@ from .config import (
 class WorkerCommand:
     action: str
     incident: str | None = None
+    customer: str | None = None
+    title: str | None = None
     resolver_group: str | None = None
     resolver_user: str | None = None
     resolution: str | None = None
@@ -60,6 +73,7 @@ class WorkerEvent:
     kind: str
     message: str
     incident: str | None = None
+    title: str | None = None
 
 
 class AutomationError(RuntimeError):
@@ -100,6 +114,7 @@ class AutomationWorker(threading.Thread):
         self.console_page: Page | None = None
         self.latest_page: Page | None = None
         self._dialog_messages: list[str] = []
+        self._create_form_opened = False
 
     def run(self) -> None:
         self._emit("ready", "UI lista. El navegador se abrirá cuando envíes una incidencia.")
@@ -108,6 +123,9 @@ class AutomationWorker(threading.Thread):
                 command = self.commands.get()
                 if command.action == "stop":
                     break
+                if command.action == "create":
+                    self._open_new_incident(command.customer, command.title)
+                    continue
                 if command.action == "search" and not command.incident:
                     self._emit("error", "Comando de búsqueda sin número de incidencia.")
                     continue
@@ -157,6 +175,7 @@ class AutomationWorker(threading.Thread):
             if not extra_page.is_closed():
                 extra_page.close()
         self.latest_page = self.console_page
+        self._create_form_opened = False
 
     def _ensure_browser(self) -> None:
         """Abre el navegador o lo reabre si el usuario lo cerró manualmente."""
@@ -215,8 +234,14 @@ class AutomationWorker(threading.Thread):
         except PlaywrightError:
             pass
 
-    def _emit(self, kind: str, message: str, incident: str | None = None) -> None:
-        self.events.put(WorkerEvent(kind=kind, message=message, incident=incident))
+    def _emit(
+        self,
+        kind: str,
+        message: str,
+        incident: str | None = None,
+        title: str | None = None,
+    ) -> None:
+        self.events.put(WorkerEvent(kind=kind, message=message, incident=incident, title=title))
 
     def _ensure_session(self, page: Page) -> None:
         path = urlsplit(page.url).path.casefold()
@@ -365,6 +390,387 @@ class AutomationWorker(threading.Thread):
                 + ", ".join(missing)
                 + ". Obténlos con la guía del README; no se usarán selectores inventados."
             )
+
+    def _open_new_incident(self, customer: str | None, title: str | None) -> None:
+        incident_id: str | None = None
+        save_attempted = False
+        try:
+            if not customer or not customer.strip():
+                raise AutomationError("Selecciona un Cliente antes de crear el ticket.")
+            if not title or not title.strip():
+                raise AutomationError("Escribe un título para la nueva incidencia.")
+            title = title.strip()
+            if len(title) > 100:
+                raise AutomationError("El título no puede superar 100 caracteres (límite de Resumen).")
+            if not HELIX_URL:
+                raise AutomationError(
+                    "Configura HELIX_URL en helix_stage1/local_settings.py antes de ejecutar."
+                )
+            menu_spec = selectors.OPEN_NEW_INCIDENT
+            if menu_spec is None:
+                raise SelectorConfigurationError("Falta el selector de Nueva incidencia.")
+
+            self._ensure_browser()
+            self._navigate_to_console()
+            page = self.console_page
+            if page is None:
+                raise AutomationError("La página de Helix no está disponible.")
+            if self._create_form_opened:
+                self._return_home_before_new_incident(page)
+            self._settle(page, CONSOLE_SETTLE_DELAY_MS, "la consola", "")
+
+            menu_item = menu_spec.build(page)
+            menu_item.wait_for(state="visible", timeout=SPA_READY_TIMEOUT_MS)
+            if menu_item.count() != 1:
+                raise SelectorConfigurationError(
+                    "Se esperaba una única opción 'Nueva incidencia'; "
+                    f"se encontraron {menu_item.count()}."
+                )
+            self._emit("log", "Seleccionando 'Nueva incidencia'…")
+            self._create_form_opened = True
+            menu_item.click(timeout=MENU_CLICK_TIMEOUT_MS)
+            self._settle(page, MENU_SETTLE_DELAY_MS, "el formulario de Nueva incidencia", "")
+            customer_field = self._wait_for_single_editable_match(
+                page,
+                selectors.NEW_INCIDENT_CUSTOMER_FIELD.build(page),
+                "Cliente de Nueva incidencia",
+                SPA_READY_TIMEOUT_MS,
+                "",
+            )
+            self._emit("log", f"Ingresando Cliente: {customer}.")
+            customer_field.click(timeout=DEFAULT_TIMEOUT_MS)
+            customer_field.press("ControlOrMeta+A", timeout=DEFAULT_TIMEOUT_MS)
+            customer_field.press("Backspace", timeout=DEFAULT_TIMEOUT_MS)
+            for character in customer.strip():
+                customer_field.press(
+                    "Space" if character == " " else character,
+                    timeout=DEFAULT_TIMEOUT_MS,
+                )
+                page.wait_for_timeout(CUSTOMER_KEYSTROKE_DELAY_MS)
+            typed_customer = customer_field.input_value(timeout=DEFAULT_TIMEOUT_MS).strip()
+            if typed_customer.casefold() != customer.strip().casefold():
+                raise VerificationError(
+                    f"Cliente quedó escrito como '{typed_customer}'; "
+                    f"se esperaba '{customer.strip()}'."
+                )
+            page.wait_for_timeout(CUSTOMER_SUGGESTION_DELAY_MS)
+            self._check_unexpected_ui(page)
+            suggestions = page.get_by_text(
+                re.compile(r"^\s*" + re.escape(customer.strip()) + r"\s*\(", re.I)
+            )
+            try:
+                suggestion = self._wait_for_single_visible_match(
+                    page, suggestions, "sugerencia de Cliente", 1_000, ""
+                )
+            except PlaywrightTimeoutError:
+                self._emit("log", "Remedy aún no muestra el Cliente; reintentando la última letra.")
+                customer_field.press("End", timeout=DEFAULT_TIMEOUT_MS)
+                customer_field.press("Backspace", timeout=DEFAULT_TIMEOUT_MS)
+                customer_field.press(customer.strip()[-1], timeout=DEFAULT_TIMEOUT_MS)
+                retry_customer = customer_field.input_value(timeout=DEFAULT_TIMEOUT_MS).strip()
+                if retry_customer.casefold() != customer.strip().casefold():
+                    raise VerificationError(
+                        "El texto del campo Cliente cambió durante el reintento. "
+                        "No se seleccionó ningún usuario."
+                    )
+                page.wait_for_timeout(CUSTOMER_SUGGESTION_DELAY_MS)
+                try:
+                    suggestion = self._wait_for_single_visible_match(
+                        page, suggestions, "sugerencia de Cliente", 8_000, ""
+                    )
+                except PlaywrightTimeoutError as error:
+                    raise AutomationError(
+                        "Remedy recibió el apellido en Cliente, pero no mostró la sugerencia. "
+                        "No se seleccionó ningún usuario; revisa el formulario en Chrome."
+                    ) from error
+            suggestion.click(timeout=DEFAULT_TIMEOUT_MS)
+            actual_customer = customer_field.input_value(timeout=DEFAULT_TIMEOUT_MS).strip()
+            if customer.strip().casefold() not in actual_customer.casefold():
+                raise VerificationError(
+                    "Se seleccionó la sugerencia, pero el campo Cliente no conserva "
+                    "el apellido elegido. Revisa Remedy antes de continuar."
+                )
+            self._select_new_incident_template(page)
+            self._select_new_incident_failure_condition(page)
+            self._set_new_incident_title_fields(page, title)
+            self._set_new_incident_categorization_company(page)
+            incident_id = self._read_new_incident_id(page)
+            self._scroll_remedy_down(page, incident_id, "el botón Guardar", steps=3)
+            save_button = selectors.NEW_INCIDENT_SAVE_BUTTON.build(page)
+            visible_buttons = self._wait_for_visible_locator_matches(
+                page, save_button, "Guardar de Nueva incidencia", SPA_READY_TIMEOUT_MS, incident_id
+            )
+            if len(visible_buttons) != 1:
+                raise SelectorConfigurationError(
+                    "Se esperaba un único botón Guardar visible en Nueva incidencia; "
+                    f"se encontraron {len(visible_buttons)}."
+                )
+            visible_buttons[0].scroll_into_view_if_needed(timeout=MENU_CLICK_TIMEOUT_MS)
+            if visible_buttons[0].is_disabled():
+                raise AutomationError("Guardar está deshabilitado; no se envió el guardado.")
+            visible_buttons[0].click(trial=True, timeout=MENU_CLICK_TIMEOUT_MS)
+
+            self._emit("log", f"Pulsando Guardar para {incident_id}.", incident_id)
+            save_attempted = True
+            visible_buttons[0].click(timeout=MENU_CLICK_TIMEOUT_MS)
+            self.latest_page = page
+            self.logger.info("Guardar pulsado para incidencia=%s; creación no verificada", incident_id)
+            self._emit("create_save_sent", "Guardar pulsado; creación no verificada.", incident_id, title)
+        except Exception as error:
+            self.logger.exception("Fallo creando incidencia; guardado intentado=%s", save_attempted)
+            if save_attempted:
+                self._emit(
+                    "create_unverified",
+                    "Se intentó pulsar Guardar, pero el resultado del clic es incierto. "
+                    f"ID reservado: {incident_id or 'no disponible'}. "
+                    f"Detalle: {error}. Busca ese ID en Remedy antes de volver a intentar.",
+                    incident_id,
+                    title,
+                )
+            else:
+                self._emit("create_error", str(error))
+
+    def _return_home_before_new_incident(self, page: Page) -> None:
+        home_spec = selectors.HOME_BUTTON
+        if home_spec is None:
+            raise SelectorConfigurationError("Falta el selector del botón Inicio.")
+        self._emit("log", "Volviendo a Inicio antes de crear otra incidencia…")
+        home_button = self._wait_for_single_visible_match(
+            page, home_spec.build(page), "botón Inicio", SPA_READY_TIMEOUT_MS, ""
+        )
+        if home_button.is_disabled():
+            raise AutomationError("El botón Inicio está deshabilitado.")
+        home_button.click(timeout=MENU_CLICK_TIMEOUT_MS)
+        self._settle(page, CONSOLE_SETTLE_DELAY_MS, "Inicio", "")
+        self._create_form_opened = False
+
+    def _read_new_incident_id(self, page: Page) -> str:
+        fields = self._wait_for_visible_locator_matches(
+            page,
+            selectors.NEW_INCIDENT_NUMBER_FIELD.build(page),
+            "ID de la nueva incidencia",
+            SPA_READY_TIMEOUT_MS,
+            "",
+        )
+        if len(fields) != 1:
+            raise SelectorConfigurationError(
+                f"Se esperaba un único ID de incidencia visible; se encontraron {len(fields)}."
+            )
+        incident_id = fields[0].input_value(timeout=DEFAULT_TIMEOUT_MS).strip().upper()
+        if re.fullmatch(r"INC\d{12}", incident_id) is None:
+            raise VerificationError(
+                f"El ID asignado por Remedy no tiene el formato esperado: '{incident_id}'."
+            )
+        self._emit("log", f"ID capturado antes de Guardar: {incident_id}.", incident_id)
+        return incident_id
+
+    def _select_new_incident_template(self, page: Page) -> str:
+        prefix = "TX-"
+        template_field = self._wait_for_single_editable_match(
+            page,
+            selectors.NEW_INCIDENT_TEMPLATE_FIELD.build(page),
+            "Plantilla de Nueva incidencia",
+            SPA_READY_TIMEOUT_MS,
+            "",
+        )
+        self._emit("log", "Buscando Plantilla TX-.")
+        template_field.click(timeout=DEFAULT_TIMEOUT_MS)
+        template_field.press("ControlOrMeta+A", timeout=DEFAULT_TIMEOUT_MS)
+        template_field.press("Backspace", timeout=DEFAULT_TIMEOUT_MS)
+        for character in prefix:
+            template_field.press(character, timeout=DEFAULT_TIMEOUT_MS)
+            page.wait_for_timeout(TEMPLATE_KEYSTROKE_DELAY_MS)
+        if template_field.input_value(timeout=DEFAULT_TIMEOUT_MS).strip().upper() != prefix:
+            raise VerificationError("No se pudo escribir TX- completo en Plantilla.")
+
+        page.wait_for_timeout(TEMPLATE_SUGGESTION_DELAY_MS)
+        self._check_unexpected_ui(page)
+        suggestions = page.get_by_text(re.compile(r"^\s*TX-", re.I))
+        try:
+            suggestion = self._wait_for_single_visible_match(
+                page, suggestions, "sugerencia de Plantilla TX-", 1_000, ""
+            )
+        except PlaywrightTimeoutError:
+            self._emit("log", "Remedy aún no muestra la Plantilla; reintentando la última tecla.")
+            template_field.press("End", timeout=DEFAULT_TIMEOUT_MS)
+            template_field.press("Backspace", timeout=DEFAULT_TIMEOUT_MS)
+            template_field.press("-", timeout=DEFAULT_TIMEOUT_MS)
+            if template_field.input_value(timeout=DEFAULT_TIMEOUT_MS).strip().upper() != prefix:
+                raise VerificationError(
+                    "El texto de Plantilla cambió durante el reintento. "
+                    "No se seleccionó ninguna plantilla."
+                )
+            page.wait_for_timeout(TEMPLATE_SUGGESTION_DELAY_MS)
+            try:
+                suggestion = self._wait_for_single_visible_match(
+                    page, suggestions, "sugerencia de Plantilla TX-", 8_000, ""
+                )
+            except PlaywrightTimeoutError as error:
+                raise AutomationError(
+                    "Remedy recibió TX- en Plantilla, pero no mostró una sugerencia. "
+                    "No se seleccionó ninguna plantilla; revisa el formulario en Chrome."
+                ) from error
+        suggestion.click(timeout=DEFAULT_TIMEOUT_MS)
+        template_name = template_field.input_value(timeout=DEFAULT_TIMEOUT_MS).strip()
+        if not template_name.upper().startswith(prefix) or template_name.upper() == prefix:
+            raise VerificationError(
+                "Se hizo clic en la sugerencia, pero Plantilla no muestra un nombre TX- completo. "
+                "Revisa Remedy antes de continuar."
+            )
+        return template_name
+
+    def _select_new_incident_failure_condition(self, page: Page) -> None:
+        widgets = self._wait_for_visible_locator_matches(
+            page,
+            selectors.NEW_INCIDENT_FAILURE_CONDITION_WIDGET.build(page),
+            "Condición de falla de Nueva incidencia",
+            SPA_READY_TIMEOUT_MS,
+            "",
+        )
+        if len(widgets) != 1:
+            raise SelectorConfigurationError(
+                "Se esperaba una única Condición de falla visible; "
+                f"se encontraron {len(widgets)}."
+            )
+        widget = widgets[0]
+        selection = widget.locator("div.selection")
+        field = selection.locator("input")
+        toggle = selection.locator("a.selectionbtn")
+        field.wait_for(state="visible", timeout=SPA_READY_TIMEOUT_MS)
+        toggle.wait_for(state="visible", timeout=SPA_READY_TIMEOUT_MS)
+        if selection.count() != 1 or field.count() != 1 or toggle.count() != 1:
+            raise SelectorConfigurationError(
+                "Condición de falla no tiene un control desplegable único."
+            )
+        expected = {"sin pérdida", "sin perdida"}
+        current = (field.input_value(timeout=DEFAULT_TIMEOUT_MS) or "").strip()
+        if current.casefold() in expected:
+            self._emit("log", "Condición de falla ya está en Sin Pérdida.")
+            return
+
+        self._emit("log", "Seleccionando Condición de falla: Sin Pérdida.")
+        toggle.click(timeout=MENU_CLICK_TIMEOUT_MS)
+        self._settle(
+            page,
+            FAILURE_CONDITION_MENU_SETTLE_DELAY_MS,
+            "las opciones de Condición de falla",
+            "",
+        )
+        option = selectors.NEW_INCIDENT_FAILURE_CONDITION_OPTION.build(page).filter(
+            has_text=re.compile(r"^\s*Sin P[eé]rdida\s*$", re.I)
+        )
+        visible_option = self._wait_for_single_visible_match(
+            page, option, "la opción Sin Pérdida", DEFAULT_TIMEOUT_MS, ""
+        )
+        visible_option.click(timeout=MENU_CLICK_TIMEOUT_MS)
+        self._settle(
+            page,
+            FAILURE_CONDITION_SETTLE_DELAY_MS,
+            "la Condición de falla",
+            "",
+        )
+        actual = (field.input_value(timeout=DEFAULT_TIMEOUT_MS) or "").strip()
+        if actual.casefold() not in expected:
+            raise VerificationError(
+                f"Condición de falla quedó como '{actual}', no como 'Sin Pérdida'."
+            )
+
+    def _set_new_incident_categorization_company(self, page: Page) -> None:
+        tab = selectors.NEW_INCIDENT_CATEGORIZATION_TAB.build(page).filter(
+            has_text=re.compile(r"^\s*Categorización\s*$", re.I)
+        )
+        tabs = self._wait_for_visible_locator_matches(
+            page, tab, "la pestaña Categorización", SPA_READY_TIMEOUT_MS, ""
+        )
+        if len(tabs) != 1:
+            raise SelectorConfigurationError(
+                "Se esperaba una única pestaña Categorización visible; "
+                f"se encontraron {len(tabs)}."
+            )
+        self._emit("log", "Abriendo pestaña Categorización.")
+        tabs[0].click(timeout=MENU_CLICK_TIMEOUT_MS)
+        self._settle(page, CATEGORIZATION_TAB_SETTLE_DELAY_MS, "la pestaña Categorización", "")
+
+        company_field = self._wait_for_single_editable_match(
+            page,
+            selectors.NEW_INCIDENT_CATEGORIZATION_COMPANY_FIELD.build(page),
+            "Empresa de Categorización",
+            SPA_READY_TIMEOUT_MS,
+            "",
+        )
+        expected = "REDES CHILE"
+        self._emit("log", f"Actualizando Empresa de Categorización a {expected}.")
+        company_field.click(timeout=DEFAULT_TIMEOUT_MS)
+        company_field.press("ControlOrMeta+A", timeout=DEFAULT_TIMEOUT_MS)
+        company_field.press("Backspace", timeout=DEFAULT_TIMEOUT_MS)
+        for character in expected:
+            company_field.press(
+                "Space" if character == " " else character,
+                timeout=DEFAULT_TIMEOUT_MS,
+            )
+            page.wait_for_timeout(COMPANY_KEYSTROKE_DELAY_MS)
+        typed_company = company_field.input_value(timeout=DEFAULT_TIMEOUT_MS).strip()
+        if typed_company.casefold() != expected.casefold():
+            raise VerificationError(
+                f"Empresa de Categorización quedó escrita como '{typed_company}', "
+                f"se esperaba '{expected}'."
+            )
+        company_field.press("Enter", timeout=DEFAULT_TIMEOUT_MS)
+        self._settle(page, COMPANY_SETTLE_DELAY_MS, "la Empresa de Categorización", "")
+        actual = company_field.input_value(timeout=DEFAULT_TIMEOUT_MS).strip()
+        if actual.casefold() != expected.casefold():
+            raise VerificationError(
+                f"Tras Enter, Empresa de Categorización quedó como '{actual}', "
+                f"no como '{expected}'."
+            )
+
+    def _set_new_incident_title_fields(self, page: Page, title: str) -> None:
+        for field_name, field_spec in (
+            ("Notas", selectors.NEW_INCIDENT_NOTES_FIELD),
+            ("Resumen", selectors.NEW_INCIDENT_SUMMARY_FIELD),
+        ):
+            field = self._wait_for_single_editable_match(
+                page, field_spec.build(page), field_name, SPA_READY_TIMEOUT_MS, ""
+            )
+            self._emit("log", f"Escribiendo título en {field_name}.")
+            if field_name == "Notas":
+                field.click(timeout=DEFAULT_TIMEOUT_MS)
+                field.press("ControlOrMeta+A", timeout=DEFAULT_TIMEOUT_MS)
+                field.press("Backspace", timeout=DEFAULT_TIMEOUT_MS)
+                field.press_sequentially(
+                    title,
+                    delay=NEW_INCIDENT_TEXT_KEYSTROKE_DELAY_MS,
+                    timeout=DEFAULT_TIMEOUT_MS,
+                )
+            else:
+                field.fill(title, timeout=DEFAULT_TIMEOUT_MS)
+            actual = field.input_value(timeout=DEFAULT_TIMEOUT_MS)
+            if actual != title:
+                raise VerificationError(
+                    f"{field_name} no recibió el título completo. "
+                    "La automatización se detuvo antes del siguiente campo."
+                )
+            field.press("Tab", timeout=DEFAULT_TIMEOUT_MS)
+            self._settle(page, NEW_INCIDENT_TEXT_SETTLE_DELAY_MS, field_name, "")
+            actual_after_blur = field.input_value(timeout=DEFAULT_TIMEOUT_MS)
+            if actual_after_blur != title:
+                raise VerificationError(
+                    f"Remedy cambió el valor de {field_name} al salir del campo. "
+                    "Revisa el formulario antes de guardar."
+                )
+
+        for field_name, field_spec in (
+            ("Notas", selectors.NEW_INCIDENT_NOTES_FIELD),
+            ("Resumen", selectors.NEW_INCIDENT_SUMMARY_FIELD),
+        ):
+            field = self._wait_for_single_editable_match(
+                page, field_spec.build(page), field_name, SPA_READY_TIMEOUT_MS, ""
+            )
+            if field.input_value(timeout=DEFAULT_TIMEOUT_MS) != title:
+                raise VerificationError(
+                    f"{field_name} cambió después de completar ambos campos. "
+                    "Revisa el formulario antes de guardar."
+                )
 
     def _process_incident(
         self,

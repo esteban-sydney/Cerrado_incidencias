@@ -14,6 +14,7 @@ import customtkinter as ctk
 
 from .automation import AutomationWorker, WorkerCommand, WorkerEvent
 from .config import LOG_DIR
+from .customer_catalog import CUSTOMERS
 from .excel_loader import (
     INCIDENT_PATTERN,
     IncidentRecord,
@@ -60,6 +61,18 @@ def _one_line(text: str, limit: int | None = None) -> str:
     return flat
 
 
+def _creation_texts(incident: str, title: str) -> tuple[str, str]:
+    summary = f"{incident}, {_one_line(title)}"
+    email = (
+        "Estimados:\n\n"
+        f'Informo que estamos presentando un evento entre "{title}".\n'
+        f'Que se atenderá con el número de incidencia "{incident}".\n\n'
+        "Favor comentar si tienen evento en su tramo.\n\n"
+        "Saludos."
+    )
+    return summary, email
+
+
 class HelixApp:
     def __init__(self, root: ctk.CTk) -> None:
         self.root = root
@@ -78,8 +91,9 @@ class HelixApp:
         self._updating_incident = False
         self._close_requested_at = 0.0
         self.close_tasks_var = tk.BooleanVar(value=False)
+        self.created_summary = ""
 
-        root.title("Cierre de incidencias | BMC Helix")
+        root.title("Incidencias | BMC Helix")
         root.geometry("980x860")
         root.minsize(900, 760)
         root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -95,6 +109,7 @@ class HelixApp:
         root.grid_rowconfigure(0, weight=1)
         container = ctk.CTkFrame(root, fg_color="transparent")
         container.grid(row=0, column=0, sticky="nsew", padx=18, pady=14)
+        self.container = container
         container.grid_columnconfigure(0, weight=1)
         container.grid_rowconfigure(4, weight=1)
 
@@ -103,6 +118,8 @@ class HelixApp:
         self._build_modes_tabs(container)
         self._build_status_card(container)
         self._build_output_tabs(container)
+        self.modes_tabs.configure(command=self._on_mode_changed)
+        self._on_mode_changed()
 
         self._style_treeview()
         self.worker.start()
@@ -117,9 +134,10 @@ class HelixApp:
         header = ctk.CTkFrame(container, fg_color="transparent")
         header.grid(row=0, column=0, sticky="ew")
         header.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(header, text="Cierre de incidencias Helix", font=self.font_title).grid(
-            row=0, column=0, sticky="w"
+        self.header_title = ctk.CTkLabel(
+            header, text="Cierre de incidencias Helix", font=self.font_title
         )
+        self.header_title.grid(row=0, column=0, sticky="w")
         ctk.CTkLabel(
             header,
             text="Automatización BMC Helix ITSM · Redes Chile",
@@ -137,6 +155,7 @@ class HelixApp:
 
     def _build_common_card(self, container: ctk.CTkFrame) -> None:
         card = self._card(container)
+        self.common_card = card
         card.grid(row=1, column=0, sticky="ew", pady=(14, 10))
         card.grid_columnconfigure((0, 1), weight=1, uniform="common")
         ctk.CTkLabel(card, text="1. Asignación del resolutor", font=self.font_section).grid(
@@ -179,7 +198,10 @@ class HelixApp:
         self.modes_tabs.grid(row=2, column=0, sticky="ew")
         manual_tab = self.modes_tabs.add("Cierre manual")
         excel_tab = self.modes_tabs.add("Cierre masivo (Excel)")
-        for tab in (manual_tab, excel_tab):
+        create_tab = self.modes_tabs.add("Crear ticket")
+        create_tab.grid_columnconfigure(1, weight=0)
+        create_tab.grid_rowconfigure(9, weight=1)
+        for tab in (manual_tab, excel_tab, create_tab):
             tab.grid_columnconfigure(0, weight=1)
 
         # --- Manual
@@ -281,6 +303,90 @@ class HelixApp:
             text_color=("gray35", "gray65"),
         ).grid(row=5, column=0, columnspan=2, sticky="w", padx=8)
 
+        ctk.CTkLabel(create_tab, text="Cliente", font=self.font_body).grid(
+            row=0, column=0, sticky="w", padx=8
+        )
+        self.customer_var = tk.StringVar()
+        self.customer_combo = ctk.CTkComboBox(
+            create_tab,
+            variable=self.customer_var,
+            values=list(CUSTOMERS),
+            state="readonly" if CUSTOMERS else "disabled",
+            font=self.font_body,
+            dropdown_font=self.font_body,
+            height=34,
+        )
+        self.customer_combo.set("")
+        self.customer_combo.grid(row=1, column=0, sticky="ew", padx=8, pady=(2, 8))
+        ctk.CTkLabel(create_tab, text="Título de la incidencia", font=self.font_body).grid(
+            row=2, column=0, sticky="w", padx=8
+        )
+        self.new_incident_title_var = tk.StringVar()
+        self.new_incident_title_entry = ctk.CTkEntry(
+            create_tab,
+            textvariable=self.new_incident_title_var,
+            font=self.font_body,
+            height=34,
+        )
+        self.new_incident_title_entry.grid(row=3, column=0, sticky="ew", padx=8, pady=(2, 8))
+        self.create_button = ctk.CTkButton(
+            create_tab,
+            text="Crear ticket",
+            command=self._start_create_ticket,
+            state="disabled",
+            height=36,
+            font=self.font_status,
+        )
+        self.create_button.grid(row=4, column=0, columnspan=2, sticky="ew", padx=8, pady=(0, 6))
+        self.create_result_status_var = tk.StringVar(value="")
+        ctk.CTkLabel(
+            create_tab,
+            textvariable=self.create_result_status_var,
+            font=self.font_subtitle,
+            text_color=("gray35", "gray65"),
+            anchor="w",
+        ).grid(row=5, column=0, columnspan=2, sticky="ew", padx=8, pady=(0, 4))
+
+        ctk.CTkLabel(create_tab, text="Incidencia", font=self.font_section).grid(
+            row=6, column=0, sticky="w", padx=8
+        )
+        self.copy_summary_button = ctk.CTkButton(
+            create_tab,
+            text="Copiar",
+            command=lambda: self._copy_creation_text("summary"),
+            state="disabled",
+            width=88,
+            height=28,
+            font=self.font_body,
+        )
+        self.copy_summary_button.grid(row=6, column=1, sticky="e", padx=8)
+        self.created_summary_text = ctk.CTkTextbox(
+            create_tab, height=56, wrap="word", font=self.font_body, state="disabled"
+        )
+        self.created_summary_text.grid(
+            row=7, column=0, columnspan=2, sticky="ew", padx=8, pady=(4, 10)
+        )
+
+        ctk.CTkLabel(create_tab, text="Correo", font=self.font_section).grid(
+            row=8, column=0, sticky="w", padx=8
+        )
+        self.copy_email_button = ctk.CTkButton(
+            create_tab,
+            text="Copiar",
+            command=lambda: self._copy_creation_text("email"),
+            state="disabled",
+            width=88,
+            height=28,
+            font=self.font_body,
+        )
+        self.copy_email_button.grid(row=8, column=1, sticky="e", padx=8)
+        self.created_email_text = ctk.CTkTextbox(
+            create_tab, height=178, wrap="word", font=self.font_body
+        )
+        self.created_email_text.grid(
+            row=9, column=0, columnspan=2, sticky="nsew", padx=8, pady=(4, 8)
+        )
+
     def _build_status_card(self, container: ctk.CTkFrame) -> None:
         card = self._card(container)
         card.grid(row=3, column=0, sticky="ew", pady=10)
@@ -373,6 +479,24 @@ class HelixApp:
     def _on_appearance_changed(self, label: str) -> None:
         ctk.set_appearance_mode(APPEARANCE_LABELS.get(label, "system"))
         self.root.after(50, self._style_treeview)
+
+    def _on_mode_changed(self) -> None:
+        if self.modes_tabs.get() == "Crear ticket":
+            self.common_card.grid_remove()
+            self.output_tabs.grid_remove()
+            self.container.grid_rowconfigure(2, weight=1)
+            self.container.grid_rowconfigure(4, weight=0)
+            self.modes_tabs.configure(height=570)
+            self.modes_tabs.grid_configure(sticky="nsew")
+            self.header_title.configure(text="Crear incidencia Helix")
+        else:
+            self.common_card.grid()
+            self.output_tabs.grid()
+            self.container.grid_rowconfigure(2, weight=0)
+            self.container.grid_rowconfigure(4, weight=1)
+            self.modes_tabs.configure(height=240)
+            self.modes_tabs.grid_configure(sticky="ew")
+            self.header_title.configure(text="Cierre de incidencias Helix")
 
     # ------------------------------------------------------------ handlers
     def _on_incident_text_changed(self, *_args: object) -> None:
@@ -506,6 +630,57 @@ class HelixApp:
         self._append_log(f"{incident}: iniciado.")
         self._queue_incident(incident, resolver[0], resolver[1], resolution)
 
+    # ------------------------------------------------------------- creation
+    def _start_create_ticket(self) -> None:
+        if self.busy or self.closing:
+            return
+        customer = self.customer_var.get().strip()
+        if customer not in CUSTOMERS:
+            self.status_var.set("Selecciona un Cliente de la lista antes de crear el ticket.")
+            return
+        title = self.new_incident_title_var.get().strip()
+        if not title:
+            self.status_var.set("Escribe el título de la nueva incidencia.")
+            self.new_incident_title_entry.focus_set()
+            return
+        if len(title) > 100:
+            self.status_var.set("El título no puede superar 100 caracteres.")
+            self.new_incident_title_entry.focus_set()
+            return
+        self.create_result_status_var.set("Preparando una nueva incidencia…")
+        self.busy = True
+        self._set_busy_buttons()
+        self.status_var.set("Abriendo Nueva incidencia y seleccionando Cliente en Remedy…")
+        self._append_log(f"Abriendo Nueva incidencia para Cliente {customer}.")
+        self.commands.put(WorkerCommand(action="create", customer=customer, title=title))
+
+    def _show_creation_output(self, incident: str, title: str) -> str:
+        summary, email = _creation_texts(incident, title)
+        self.created_summary = summary
+        self.created_summary_text.configure(state="normal")
+        self.created_summary_text.delete("1.0", "end")
+        self.created_summary_text.insert("1.0", summary)
+        self.created_summary_text.configure(state="disabled")
+        self.created_email_text.delete("1.0", "end")
+        self.created_email_text.insert("1.0", email)
+        self.create_result_status_var.set("Proceso finalizado. Guardar enviado.")
+        self.copy_summary_button.configure(state="normal")
+        self.copy_email_button.configure(state="normal")
+        return summary
+
+    def _copy_creation_text(self, kind: Literal["summary", "email"]) -> None:
+        value = (
+            self.created_summary
+            if kind == "summary"
+            else self.created_email_text.get("1.0", "end-1c")
+        )
+        if not value.strip():
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(value)
+        self.root.update_idletasks()
+        self.status_var.set("Incidencia copiada." if kind == "summary" else "Correo copiado.")
+
     # --------------------------------------------------------------- batch
     def _start_excel_batch(self) -> None:
         if self.busy or self.closing:
@@ -579,6 +754,11 @@ class HelixApp:
     def _set_idle_buttons(self) -> None:
         state = "disabled" if self.closing else "normal"
         self.search_button.configure(state=state)
+        self.create_button.configure(state=state)
+        self.new_incident_title_entry.configure(state=state)
+        self.customer_combo.configure(
+            state="readonly" if state == "normal" and CUSTOMERS else "disabled"
+        )
         self.load_excel_button.configure(state=state)
         self.close_tasks_check.configure(state=state)
         self.close_tasks_check_manual.configure(state=state)
@@ -588,6 +768,9 @@ class HelixApp:
 
     def _set_busy_buttons(self) -> None:
         self.search_button.configure(state="disabled")
+        self.create_button.configure(state="disabled")
+        self.new_incident_title_entry.configure(state="disabled")
+        self.customer_combo.configure(state="disabled")
         self.load_excel_button.configure(state="disabled")
         self.close_tasks_check.configure(state="disabled")
         self.close_tasks_check_manual.configure(state="disabled")
@@ -770,6 +953,43 @@ class HelixApp:
             self.status_var.set(event.message)
             self._append_log(f"Advertencia: {event.message}")
             self._finish_current_operation()
+        elif event.kind == "create_save_sent":
+            if not event.incident or not event.title:
+                self.status_var.set("Guardar pulsado, pero faltan datos del resumen.")
+                self._append_log("Guardar pulsado sin ID o título en el resultado del worker.")
+                self._finish_current_operation()
+                return
+            summary = self._show_creation_output(event.incident, event.title)
+            self.new_incident_title_var.set("")
+            self.status_var.set(f"Guardar enviado: {event.incident}")
+            self._append_log(f"Guardar enviado: {summary}")
+            try:
+                LOG_DIR.mkdir(parents=True, exist_ok=True)
+                with (LOG_DIR / "Incidencias creadas.txt").open("a", encoding="utf-8") as report:
+                    report.write(f"{summary}\n")
+            except OSError as error:
+                self._append_log(f"No se pudo actualizar la bitácora local: {error}")
+                messagebox.showwarning(
+                    "Bitácora", f"Guardar enviado, pero no se pudo guardar la bitácora: {error}"
+                )
+            self._finish_current_operation()
+            messagebox.showinfo(
+                "Proceso finalizado",
+                f"Se pulsó Guardar para {event.incident}.\n"
+                "El resumen y el correo están listos para copiar en Crear ticket.",
+            )
+        elif event.kind == "create_unverified":
+            self.status_var.set("No se pudo determinar si Guardar fue enviado.")
+            self.create_result_status_var.set("Resultado de Guardar incierto; revisa Remedy.")
+            self._append_log(event.message)
+            self._finish_current_operation()
+            messagebox.showwarning("Creación no confirmada", event.message)
+        elif event.kind == "create_error":
+            self.status_var.set("No se pudo preparar Nueva incidencia.")
+            self.create_result_status_var.set("No se completó el nuevo ticket. Resultado anterior conservado.")
+            self._append_log(f"Error al preparar Nueva incidencia: {event.message}")
+            self._finish_current_operation()
+            messagebox.showerror("Crear ticket", event.message)
         elif event.kind == "done":
             self.status_var.set(f"Incidencia verificada: {event.incident}")
             self._handle_incident_finished(event.incident, "OK", event.message)

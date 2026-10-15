@@ -44,6 +44,39 @@ class LocatorSpec:
 OPEN_INCIDENT_SEARCH: LocatorSpec | None = LocatorSpec(
     "css", '[ardbn="z2NI_SearchIncident"][artype="NavBarItem"]'
 )
+OPEN_NEW_INCIDENT: LocatorSpec | None = LocatorSpec(
+    "css", '[ardbn="z2NI_NewIncident"][artype="NavBarItem"]'
+)
+NEW_INCIDENT_CUSTOMER_FIELD: LocatorSpec = LocatorSpec(
+    "css", '[ardbn="Customer"][artype="Char"] textarea'
+)
+NEW_INCIDENT_TEMPLATE_FIELD: LocatorSpec = LocatorSpec(
+    "css", '[ardbn="z1D_Template_Name"][artype="Char"] textarea'
+)
+NEW_INCIDENT_FAILURE_CONDITION_WIDGET: LocatorSpec = LocatorSpec(
+    "css", '[ardbn="Condicion_de_falla"][artype="EnumSel"]'
+)
+NEW_INCIDENT_FAILURE_CONDITION_OPTION: LocatorSpec = LocatorSpec(
+    "css", "table.MenuTable tr.MenuTableRow td.MenuEntryName"
+)
+NEW_INCIDENT_CATEGORIZATION_TAB: LocatorSpec = LocatorSpec(
+    "css", "a.btn.f1:visible"
+)
+NEW_INCIDENT_CATEGORIZATION_COMPANY_FIELD: LocatorSpec = LocatorSpec(
+    "css", '[ardbn="Company"][arid="1000000001"][artype="Char"] textarea'
+)
+NEW_INCIDENT_SUMMARY_FIELD: LocatorSpec = LocatorSpec(
+    "css", '[arid="1000000000"][artype="Char"] textarea'
+)
+NEW_INCIDENT_NOTES_FIELD: LocatorSpec = LocatorSpec(
+    "css", '[arid="1000000151"][artype="Char"] textarea'
+)
+NEW_INCIDENT_NUMBER_FIELD: LocatorSpec = LocatorSpec(
+    "css", '[arid="1000000161"][artype="Char"] textarea[readonly]'
+)
+NEW_INCIDENT_SAVE_BUTTON: LocatorSpec = LocatorSpec(
+    "css", 'a[artype="Control"][arid="301614800"]:has(div.f1:text-is("Guardar"))'
+)
 SEARCH_FIELD: LocatorSpec | None = LocatorSpec(
     "css",
     (

@@ -8,3 +8,4 @@ logs/
 screenshots/
 helix_stage1/local_settings.py
 resolver_catalog.local.json
+customer_catalog.local.json
