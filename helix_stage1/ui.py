@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import queue
 import re
 import tkinter as tk
@@ -8,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Literal
+from urllib.parse import quote, urlencode
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import customtkinter as ctk
@@ -15,6 +17,7 @@ import customtkinter as ctk
 from .automation import AutomationWorker, WorkerCommand, WorkerEvent
 from .config import LOG_DIR
 from .customer_catalog import CUSTOMERS
+from .email_catalog import EMAIL_RECIPIENT_GROUPS
 from .excel_loader import (
     INCIDENT_PATTERN,
     IncidentRecord,
@@ -32,6 +35,7 @@ UI_FONT = "Segoe UI"
 BatchStatus = Literal["OK", "ERROR"]
 
 APPEARANCE_LABELS = {"Sistema": "system", "Claro": "light", "Oscuro": "dark"}
+NO_EMAIL_GROUP = "Sin seleccionar"
 
 
 def _create_logger() -> logging.Logger:
@@ -94,11 +98,11 @@ class HelixApp:
         self.created_summary = ""
 
         root.title("Incidencias | BMC Helix")
-        root.geometry("980x860")
-        root.minsize(900, 760)
+        root.geometry("820x670")
+        root.minsize(760, 620)
         root.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        self.font_title = ctk.CTkFont(family=UI_FONT, size=22, weight="bold")
+        self.font_title = ctk.CTkFont(family=UI_FONT, size=19, weight="bold")
         self.font_subtitle = ctk.CTkFont(family=UI_FONT, size=12)
         self.font_section = ctk.CTkFont(family=UI_FONT, size=13, weight="bold")
         self.font_body = ctk.CTkFont(family=UI_FONT, size=13)
@@ -108,7 +112,7 @@ class HelixApp:
         root.grid_columnconfigure(0, weight=1)
         root.grid_rowconfigure(0, weight=1)
         container = ctk.CTkFrame(root, fg_color="transparent")
-        container.grid(row=0, column=0, sticky="nsew", padx=18, pady=14)
+        container.grid(row=0, column=0, sticky="nsew", padx=12, pady=10)
         self.container = container
         container.grid_columnconfigure(0, weight=1)
         container.grid_rowconfigure(4, weight=1)
@@ -128,7 +132,7 @@ class HelixApp:
 
     # ------------------------------------------------------------------ UI
     def _card(self, parent: ctk.CTkBaseClass) -> ctk.CTkFrame:
-        return ctk.CTkFrame(parent, corner_radius=12)
+        return ctk.CTkFrame(parent, corner_radius=8)
 
     def _build_header(self, container: ctk.CTkFrame) -> None:
         header = ctk.CTkFrame(container, fg_color="transparent")
@@ -151,21 +155,33 @@ class HelixApp:
             font=self.font_subtitle,
         )
         self.appearance_menu.set("Sistema")
-        self.appearance_menu.grid(row=0, column=1, rowspan=2, sticky="e")
+        self.appearance_menu.grid(row=0, column=2, rowspan=2, sticky="e")
+        self.restore_button = ctk.CTkButton(
+            header,
+            text="Restaurar",
+            command=self._restore_app,
+            width=90,
+            height=28,
+            font=self.font_subtitle,
+            fg_color=("gray75", "gray30"),
+            hover_color=("gray65", "gray40"),
+            text_color=("gray10", "gray90"),
+        )
+        self.restore_button.grid(row=0, column=1, rowspan=2, sticky="e", padx=(8, 10))
 
     def _build_common_card(self, container: ctk.CTkFrame) -> None:
         card = self._card(container)
         self.common_card = card
-        card.grid(row=1, column=0, sticky="ew", pady=(14, 10))
+        card.grid(row=1, column=0, sticky="ew", pady=(8, 6))
         card.grid_columnconfigure((0, 1), weight=1, uniform="common")
         ctk.CTkLabel(card, text="1. Asignación del resolutor", font=self.font_section).grid(
-            row=0, column=0, columnspan=2, sticky="w", padx=16, pady=(12, 6)
+            row=0, column=0, columnspan=2, sticky="w", padx=12, pady=(8, 2)
         )
         ctk.CTkLabel(card, text="Grupo Resolutor", font=self.font_body).grid(
-            row=1, column=0, sticky="w", padx=(16, 8)
+            row=1, column=0, sticky="w", padx=(12, 6)
         )
         ctk.CTkLabel(card, text="Usuario Resolutor", font=self.font_body).grid(
-            row=1, column=1, sticky="w", padx=(8, 16)
+            row=1, column=1, sticky="w", padx=(6, 12)
         )
         self.resolver_group_var = tk.StringVar()
         self.resolver_group_combo = ctk.CTkComboBox(
@@ -176,10 +192,10 @@ class HelixApp:
             command=self._on_group_selected,
             font=self.font_body,
             dropdown_font=self.font_body,
-            height=34,
+            height=30,
         )
         self.resolver_group_combo.set("")
-        self.resolver_group_combo.grid(row=2, column=0, sticky="ew", padx=(16, 8), pady=(2, 14))
+        self.resolver_group_combo.grid(row=2, column=0, sticky="ew", padx=(12, 6), pady=(2, 8))
         self.resolver_user_var = tk.StringVar()
         self.resolver_user_combo = ctk.CTkComboBox(
             card,
@@ -188,20 +204,24 @@ class HelixApp:
             state="disabled",
             font=self.font_body,
             dropdown_font=self.font_body,
-            height=34,
+            height=30,
         )
         self.resolver_user_combo.set("")
-        self.resolver_user_combo.grid(row=2, column=1, sticky="ew", padx=(8, 16), pady=(2, 14))
+        self.resolver_user_combo.grid(row=2, column=1, sticky="ew", padx=(6, 12), pady=(2, 8))
 
     def _build_modes_tabs(self, container: ctk.CTkFrame) -> None:
-        self.modes_tabs = ctk.CTkTabview(container, corner_radius=12, height=240)
+        self.modes_tabs = ctk.CTkTabview(container, corner_radius=8, height=210)
         self.modes_tabs.grid(row=2, column=0, sticky="ew")
         manual_tab = self.modes_tabs.add("Cierre manual")
         excel_tab = self.modes_tabs.add("Cierre masivo (Excel)")
         create_tab = self.modes_tabs.add("Crear ticket")
-        create_tab.grid_columnconfigure(1, weight=0)
-        create_tab.grid_rowconfigure(9, weight=1)
-        for tab in (manual_tab, excel_tab, create_tab):
+        create_tab.grid_columnconfigure(0, weight=1)
+        create_tab.grid_rowconfigure(0, weight=1)
+        create_form = ctk.CTkScrollableFrame(create_tab, fg_color="transparent", corner_radius=0)
+        create_form.grid(row=0, column=0, sticky="nsew")
+        create_form.grid_columnconfigure(0, weight=1)
+        create_form.grid_columnconfigure(1, weight=0)
+        for tab in (manual_tab, excel_tab):
             tab.grid_columnconfigure(0, weight=1)
 
         # --- Manual
@@ -303,12 +323,12 @@ class HelixApp:
             text_color=("gray35", "gray65"),
         ).grid(row=5, column=0, columnspan=2, sticky="w", padx=8)
 
-        ctk.CTkLabel(create_tab, text="Cliente", font=self.font_body).grid(
+        ctk.CTkLabel(create_form, text="Cliente", font=self.font_body).grid(
             row=0, column=0, sticky="w", padx=8
         )
         self.customer_var = tk.StringVar()
         self.customer_combo = ctk.CTkComboBox(
-            create_tab,
+            create_form,
             variable=self.customer_var,
             values=list(CUSTOMERS),
             state="readonly" if CUSTOMERS else "disabled",
@@ -317,41 +337,42 @@ class HelixApp:
             height=34,
         )
         self.customer_combo.set("")
-        self.customer_combo.grid(row=1, column=0, sticky="ew", padx=8, pady=(2, 8))
-        ctk.CTkLabel(create_tab, text="Título de la incidencia", font=self.font_body).grid(
+        self.customer_combo.grid(row=1, column=0, columnspan=2, sticky="ew", padx=8, pady=(2, 5))
+        ctk.CTkLabel(create_form, text="Título de la incidencia", font=self.font_body).grid(
             row=2, column=0, sticky="w", padx=8
         )
         self.new_incident_title_var = tk.StringVar()
         self.new_incident_title_entry = ctk.CTkEntry(
-            create_tab,
+            create_form,
             textvariable=self.new_incident_title_var,
             font=self.font_body,
             height=34,
         )
-        self.new_incident_title_entry.grid(row=3, column=0, sticky="ew", padx=8, pady=(2, 8))
+        self.new_incident_title_entry.grid(row=3, column=0, columnspan=2, sticky="ew", padx=8, pady=(2, 5))
         self.create_button = ctk.CTkButton(
-            create_tab,
+            create_form,
             text="Crear ticket",
             command=self._start_create_ticket,
             state="disabled",
-            height=36,
+            width=150,
+            height=32,
             font=self.font_status,
         )
-        self.create_button.grid(row=4, column=0, columnspan=2, sticky="ew", padx=8, pady=(0, 6))
+        self.create_button.grid(row=4, column=0, columnspan=2, sticky="w", padx=8, pady=(0, 4))
         self.create_result_status_var = tk.StringVar(value="")
         ctk.CTkLabel(
-            create_tab,
+            create_form,
             textvariable=self.create_result_status_var,
             font=self.font_subtitle,
             text_color=("gray35", "gray65"),
             anchor="w",
         ).grid(row=5, column=0, columnspan=2, sticky="ew", padx=8, pady=(0, 4))
 
-        ctk.CTkLabel(create_tab, text="Incidencia", font=self.font_section).grid(
+        ctk.CTkLabel(create_form, text="Asunto", font=self.font_section).grid(
             row=6, column=0, sticky="w", padx=8
         )
         self.copy_summary_button = ctk.CTkButton(
-            create_tab,
+            create_form,
             text="Copiar",
             command=lambda: self._copy_creation_text("summary"),
             state="disabled",
@@ -361,17 +382,17 @@ class HelixApp:
         )
         self.copy_summary_button.grid(row=6, column=1, sticky="e", padx=8)
         self.created_summary_text = ctk.CTkTextbox(
-            create_tab, height=56, wrap="word", font=self.font_body, state="disabled"
+            create_form, height=46, wrap="word", font=self.font_body, state="disabled"
         )
         self.created_summary_text.grid(
-            row=7, column=0, columnspan=2, sticky="ew", padx=8, pady=(4, 10)
+            row=7, column=0, columnspan=2, sticky="ew", padx=8, pady=(3, 6)
         )
 
-        ctk.CTkLabel(create_tab, text="Correo", font=self.font_section).grid(
+        ctk.CTkLabel(create_form, text="Cuerpo del correo", font=self.font_section).grid(
             row=8, column=0, sticky="w", padx=8
         )
         self.copy_email_button = ctk.CTkButton(
-            create_tab,
+            create_form,
             text="Copiar",
             command=lambda: self._copy_creation_text("email"),
             state="disabled",
@@ -381,28 +402,85 @@ class HelixApp:
         )
         self.copy_email_button.grid(row=8, column=1, sticky="e", padx=8)
         self.created_email_text = ctk.CTkTextbox(
-            create_tab, height=178, wrap="word", font=self.font_body
+            create_form, height=160, wrap="word", font=self.font_body
         )
-        self.created_email_text.grid(
-            row=9, column=0, columnspan=2, sticky="nsew", padx=8, pady=(4, 8)
+        self.created_email_text.grid(row=9, column=0, sticky="nsew", padx=(8, 6), pady=(3, 6))
+
+        recipients = ctk.CTkFrame(create_form, fg_color="transparent", width=310)
+        recipients.grid(row=9, column=1, sticky="nsew", padx=(6, 8), pady=(3, 6))
+        recipients.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(recipients, text="TO · Grupo", font=self.font_body, height=18).grid(
+            row=0, column=0, sticky="w"
         )
+        self.email_to_var = tk.StringVar(value=NO_EMAIL_GROUP)
+        self.email_to_combo = ctk.CTkComboBox(
+            recipients,
+            variable=self.email_to_var,
+            values=[NO_EMAIL_GROUP, *EMAIL_RECIPIENT_GROUPS],
+            state="readonly",
+            command=lambda _value: self._on_email_group_changed(),
+            font=self.font_body,
+            dropdown_font=self.font_body,
+            width=300,
+            height=28,
+        )
+        self.email_to_combo.set(NO_EMAIL_GROUP)
+        self.email_to_combo.grid(row=1, column=0, sticky="ew", pady=(1, 2))
+        self.email_to_count_var = tk.StringVar(value="Sin seleccionar")
+        ctk.CTkLabel(
+            recipients, textvariable=self.email_to_count_var, font=self.font_subtitle,
+            text_color=("gray35", "gray65"), height=16,
+        ).grid(row=2, column=0, sticky="w")
+
+        ctk.CTkLabel(recipients, text="CC · Grupo", font=self.font_body, height=18).grid(
+            row=3, column=0, sticky="w", pady=(2, 0)
+        )
+        self.email_cc_var = tk.StringVar(value=NO_EMAIL_GROUP)
+        self.email_cc_combo = ctk.CTkComboBox(
+            recipients,
+            variable=self.email_cc_var,
+            values=[NO_EMAIL_GROUP, *EMAIL_RECIPIENT_GROUPS],
+            state="readonly",
+            command=lambda _value: self._on_email_group_changed(),
+            font=self.font_body,
+            dropdown_font=self.font_body,
+            width=300,
+            height=28,
+        )
+        self.email_cc_combo.set(NO_EMAIL_GROUP)
+        self.email_cc_combo.grid(row=4, column=0, sticky="ew", pady=(1, 2))
+        self.email_cc_count_var = tk.StringVar(value="Sin seleccionar")
+        ctk.CTkLabel(
+            recipients, textvariable=self.email_cc_count_var, font=self.font_subtitle,
+            text_color=("gray35", "gray65"), height=16,
+        ).grid(row=5, column=0, sticky="w")
+        self.open_email_button = ctk.CTkButton(
+            recipients,
+            text="Crear correo",
+            command=self._open_creation_email,
+            state="disabled",
+            width=132,
+            height=28,
+            font=self.font_body,
+        )
+        self.open_email_button.grid(row=6, column=0, sticky="e", pady=(3, 0))
 
     def _build_status_card(self, container: ctk.CTkFrame) -> None:
         card = self._card(container)
-        card.grid(row=3, column=0, sticky="ew", pady=10)
+        card.grid(row=3, column=0, sticky="ew", pady=6)
         card.grid_columnconfigure(0, weight=1)
         self.status_var = tk.StringVar(value="Iniciando la interfaz…")
         ctk.CTkLabel(
             card,
             textvariable=self.status_var,
             font=self.font_status,
-            wraplength=880,
+            wraplength=720,
             justify="left",
             anchor="w",
-        ).grid(row=0, column=0, sticky="ew", padx=16, pady=10)
+        ).grid(row=0, column=0, sticky="ew", padx=12, pady=7)
 
     def _build_output_tabs(self, container: ctk.CTkFrame) -> None:
-        self.output_tabs = ctk.CTkTabview(container, corner_radius=12)
+        self.output_tabs = ctk.CTkTabview(container, corner_radius=8)
         self.output_tabs.grid(row=4, column=0, sticky="nsew")
         results_tab = self.output_tabs.add("Resultados")
         log_tab = self.output_tabs.add("Registro")
@@ -414,7 +492,7 @@ class HelixApp:
             columns=("index", "incident", "status", "resolution", "detail"),
             show="headings",
             style="Helix.Treeview",
-            height=6,
+            height=4,
         )
         for column, title, width, anchor, stretch in (
             ("index", "#", 44, "center", False),
@@ -486,7 +564,7 @@ class HelixApp:
             self.output_tabs.grid_remove()
             self.container.grid_rowconfigure(2, weight=1)
             self.container.grid_rowconfigure(4, weight=0)
-            self.modes_tabs.configure(height=570)
+            self.modes_tabs.configure(height=455)
             self.modes_tabs.grid_configure(sticky="nsew")
             self.header_title.configure(text="Crear incidencia Helix")
         else:
@@ -494,7 +572,7 @@ class HelixApp:
             self.output_tabs.grid()
             self.container.grid_rowconfigure(2, weight=0)
             self.container.grid_rowconfigure(4, weight=1)
-            self.modes_tabs.configure(height=240)
+            self.modes_tabs.configure(height=210)
             self.modes_tabs.grid_configure(sticky="ew")
             self.header_title.configure(text="Cierre de incidencias Helix")
 
@@ -647,6 +725,11 @@ class HelixApp:
             self.status_var.set("El título no puede superar 100 caracteres.")
             self.new_incident_title_entry.focus_set()
             return
+        self.email_to_var.set(NO_EMAIL_GROUP)
+        self.email_to_combo.set(NO_EMAIL_GROUP)
+        self.email_cc_var.set(NO_EMAIL_GROUP)
+        self.email_cc_combo.set(NO_EMAIL_GROUP)
+        self._on_email_group_changed()
         self.create_result_status_var.set("Preparando una nueva incidencia…")
         self.busy = True
         self._set_busy_buttons()
@@ -666,6 +749,7 @@ class HelixApp:
         self.create_result_status_var.set("Proceso finalizado. Guardar enviado.")
         self.copy_summary_button.configure(state="normal")
         self.copy_email_button.configure(state="normal")
+        self._on_email_group_changed()
         return summary
 
     def _copy_creation_text(self, kind: Literal["summary", "email"]) -> None:
@@ -680,6 +764,110 @@ class HelixApp:
         self.root.clipboard_append(value)
         self.root.update_idletasks()
         self.status_var.set("Incidencia copiada." if kind == "summary" else "Correo copiado.")
+
+    def _open_creation_email(self) -> None:
+        body = self.created_email_text.get("1.0", "end-1c")
+        if not self.created_summary or not body.strip():
+            return
+        to_group = self.email_to_var.get()
+        cc_group = self.email_cc_var.get()
+        if to_group not in ("", NO_EMAIL_GROUP) and to_group not in EMAIL_RECIPIENT_GROUPS:
+            self.status_var.set("El grupo TO seleccionado no existe.")
+            return
+        if cc_group not in ("", NO_EMAIL_GROUP) and cc_group not in EMAIL_RECIPIENT_GROUPS:
+            self.status_var.set("El grupo CC seleccionado no existe.")
+            return
+        subject = self.created_summary
+        to_addresses = EMAIL_RECIPIENT_GROUPS.get(to_group, ())
+        to_keys = {address.casefold() for address in to_addresses}
+        cc_addresses = tuple(
+            address for address in EMAIL_RECIPIENT_GROUPS.get(cc_group, ())
+            if address.casefold() not in to_keys
+        )
+        params = {"subject": subject, "body": body}
+        if cc_addresses:
+            params["cc"] = ",".join(cc_addresses)
+        mailto = "mailto:" + quote(",".join(to_addresses), safe="@,") + "?" + urlencode(
+            params, quote_via=quote
+        )
+        try:
+            os.startfile(mailto)
+        except OSError as error:
+            messagebox.showerror(
+                "Abrir correo",
+                f"No se pudo abrir la aplicación de correo predeterminada: {error}",
+            )
+
+    def _on_email_group_changed(self) -> None:
+        to_group = self.email_to_var.get()
+        cc_group = self.email_cc_var.get()
+        self.email_to_count_var.set(
+            f"{len(EMAIL_RECIPIENT_GROUPS[to_group])} correos"
+            if to_group in EMAIL_RECIPIENT_GROUPS else "Sin seleccionar"
+        )
+        self.email_cc_count_var.set(
+            f"{len(EMAIL_RECIPIENT_GROUPS[cc_group])} correos"
+            if cc_group in EMAIL_RECIPIENT_GROUPS else "Sin seleccionar"
+        )
+        self.open_email_button.configure(
+            state="normal" if self.created_summary else "disabled"
+        )
+
+    def _restore_app(self) -> None:
+        if self.busy or self.closing:
+            return
+        if not messagebox.askyesno(
+            "Restaurar aplicación",
+            "Se limpiarán los datos y resultados visibles de esta sesión. "
+            "Los archivos de bitácora y la sesión de Chrome se conservarán. ¿Continuar?",
+        ):
+            return
+
+        self.resolver_group_var.set("")
+        self.resolver_group_combo.set("")
+        self.resolver_user_var.set("")
+        self.resolver_user_combo.configure(values=[""], state="disabled")
+        self.resolver_user_combo.set("")
+        self.incident_var.set("")
+        self._last_incident_text = ""
+        self.resolution_text.delete("1.0", "end")
+        self.close_tasks_var.set(False)
+        self.loaded_records = []
+        self.resolution_by_incident.clear()
+        self.batch_running = False
+        self.batch_index = 0
+        self.batch_results = []
+        self.excel_status_var.set("Sin Excel cargado.")
+        self.batch_progress.set(0)
+        self.batch_progress_var.set("Sin proceso activo.")
+        self._clear_results_table()
+
+        self.customer_var.set("")
+        self.customer_combo.set("")
+        self.new_incident_title_var.set("")
+        self.created_summary = ""
+        self.created_summary_text.configure(state="normal")
+        self.created_summary_text.delete("1.0", "end")
+        self.created_summary_text.configure(state="disabled")
+        self.created_email_text.delete("1.0", "end")
+        self.create_result_status_var.set("")
+        self.email_to_var.set(NO_EMAIL_GROUP)
+        self.email_to_combo.set(NO_EMAIL_GROUP)
+        self.email_cc_var.set(NO_EMAIL_GROUP)
+        self.email_cc_combo.set(NO_EMAIL_GROUP)
+        self._on_email_group_changed()
+        self.copy_summary_button.configure(state="disabled")
+        self.copy_email_button.configure(state="disabled")
+
+        self.log_text.configure(state="normal")
+        self.log_text.delete("1.0", "end")
+        self.log_text.configure(state="disabled")
+        self.output_tabs.set("Resultados")
+        self.modes_tabs.set("Cierre manual")
+        self._on_mode_changed()
+        self.status_var.set("Lista para una nueva operación.")
+        self._set_idle_buttons()
+        self.entry.focus_set()
 
     # --------------------------------------------------------------- batch
     def _start_excel_batch(self) -> None:
@@ -753,6 +941,7 @@ class HelixApp:
     # ------------------------------------------------------ buttons / table
     def _set_idle_buttons(self) -> None:
         state = "disabled" if self.closing else "normal"
+        self.restore_button.configure(state=state)
         self.search_button.configure(state=state)
         self.create_button.configure(state=state)
         self.new_incident_title_entry.configure(state=state)
@@ -767,6 +956,7 @@ class HelixApp:
         )
 
     def _set_busy_buttons(self) -> None:
+        self.restore_button.configure(state="disabled")
         self.search_button.configure(state="disabled")
         self.create_button.configure(state="disabled")
         self.new_incident_title_entry.configure(state="disabled")
@@ -972,18 +1162,23 @@ class HelixApp:
                 messagebox.showwarning(
                     "Bitácora", f"Guardar enviado, pero no se pudo guardar la bitácora: {error}"
                 )
-            self._finish_current_operation()
             messagebox.showinfo(
                 "Proceso finalizado",
                 f"Se pulsó Guardar para {event.incident}.\n"
                 "El resumen y el correo están listos para copiar en Crear ticket.",
             )
+        elif event.kind == "create_home_ready":
+            self._finish_current_operation()
         elif event.kind == "create_unverified":
             self.status_var.set("No se pudo determinar si Guardar fue enviado.")
             self.create_result_status_var.set("Resultado de Guardar incierto; revisa Remedy.")
             self._append_log(event.message)
             self._finish_current_operation()
             messagebox.showwarning("Creación no confirmada", event.message)
+        elif event.kind == "create_home_warning":
+            self.status_var.set("Guardar enviado; revisa la pantalla de Remedy antes de continuar.")
+            self._append_log(event.message)
+            self._finish_current_operation()
         elif event.kind == "create_error":
             self.status_var.set("No se pudo preparar Nueva incidencia.")
             self.create_result_status_var.set("No se completó el nuevo ticket. Resultado anterior conservado.")

@@ -1,123 +1,78 @@
-# Consulta segura de incidencias BMC Helix (Etapa 1)
+# Automatización de incidencias BMC Helix
 
-El flujo permite elegir Grupo Resolutor y Usuario Resolutor y escribir una Resolución en Tkinter; busca la incidencia, completa los campos de `Redes Chile`, selecciona Estado `Cerrado` y Motivo `Resolución autom. notificada`, escribe Resolución y pulsa `Guardar` al final.
+Aplicación de escritorio para cerrar incidencias individualmente o desde una planilla y para preparar nuevas incidencias en BMC Helix ITSM. La interfaz está hecha con CustomTkinter y la navegación de Remedy usa Playwright con Google Chrome.
 
-## Suposiciones
+## Requisitos
 
-- Windows con Google Chrome instalado, Python 3.11 o superior y una sesión SSO ya autenticada o que pueda autenticarse manualmente en el Chrome abierto por la herramienta.
-- Al ejecutar `python main.py` solo se abre Tkinter; Chrome no se inicia hasta enviar una incidencia.
-- La automatización mantiene una única pestaña Chrome. Las páginas emergentes se cierran para evitar ventanas duplicadas; la búsqueda debe ocurrir en la SPA principal.
-- No se presupone idioma de interfaz. Los selectores se obtienen de la sesión real mediante Playwright codegen.
-- Chrome queda abierto entre búsquedas mientras Tkinter siga abierto. Al cerrar Tkinter, el contexto de Chrome se cierra limpiamente.
+- Windows, Google Chrome y Python 3.11 o superior.
+- Acceso autorizado a Helix y sesión SSO iniciada manualmente cuando Chrome la solicite. La aplicación no automatiza el inicio de sesión.
+- Una sola instancia de la aplicación usando el perfil `chrome_profile/` a la vez.
 
-## Estructura
+## Instalación
 
-```text
-.
-├── main.py
-├── requirements.txt
-├── README.md
-└── helix_stage1/
-    ├── __init__.py
-    ├── automation.py
-    ├── config.py
-    ├── local_settings.example.py
-    ├── resolver_catalog.py
-    ├── selectors.py
-    └── ui.py
-```
-
-En tiempo de ejecución se crean `chrome_profile/` y `logs/`; están excluidos de Git porque contienen datos de sesión y operación. Los datos propios del entorno también quedan fuera de Git: `helix_stage1/local_settings.py` y `resolver_catalog.local.json`.
-
-## Instalación y ejecución
-
-Desde PowerShell, situado en la carpeta del proyecto:
+Abre PowerShell en la raíz del proyecto. Comprueba la versión instalada con `py --list` y crea el entorno con una versión disponible de Python 3.11 o superior:
 
 ```powershell
 py -3.11 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-python -m playwright install chrome
-python main.py
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m playwright install chrome
 ```
 
-Tkinter suele venir incluido con Python para Windows. `playwright install chrome` instala el canal de Chrome administrado por Playwright si hace falta; `channel="chrome"` también puede usar Google Chrome instalado en el equipo.
+No hace falta activar `.venv`, así que estos comandos también funcionan cuando PowerShell bloquea `Activate.ps1`. Si `py -3.11` indica que no existe esa versión, instala Python o sustituye `-3.11` por una versión disponible compatible.
 
-Antes de ejecutar por primera vez, crea tus archivos locales desde los ejemplos:
+Crea los archivos locales solo si todavía no existen:
 
 ```powershell
-Copy-Item helix_stage1\local_settings.example.py helix_stage1\local_settings.py
-Copy-Item resolver_catalog.example.json resolver_catalog.local.json
+if (-not (Test-Path helix_stage1\local_settings.py)) { Copy-Item helix_stage1\local_settings.example.py helix_stage1\local_settings.py }
+if (-not (Test-Path resolver_catalog.local.json)) { Copy-Item resolver_catalog.example.json resolver_catalog.local.json }
+if (-not (Test-Path customer_catalog.local.json)) { Copy-Item customer_catalog.example.json customer_catalog.local.json }
+if (-not (Test-Path email_recipients.local.json)) { Copy-Item email_recipients.example.json email_recipients.local.json }
 ```
 
-Luego edita `helix_stage1/local_settings.py` con la URL real de Helix y `resolver_catalog.local.json` con los grupos y usuarios autorizados. Esos archivos no se suben a Git.
+En `helix_stage1/local_settings.py`, configura `HELIX_URL` con la URL real de tu consola. El canal de navegador predeterminado es `chrome`. En `resolver_catalog.local.json`, registra grupos y usuarios resolutores; en `customer_catalog.local.json`, los apellidos seleccionables como Cliente al crear un ticket. En `email_recipients.local.json`, los correos se organizan por operador y grupo; la interfaz permite seleccionar cada grupo por separado para TO o CC. Los archivos `*.example.*` muestran el formato sin publicar datos reales.
 
-## Obtener los selectores reales
-
-1. Cierra la aplicación si está ejecutándose. Abre PowerShell en la carpeta del proyecto y lanza:
-
-   ```powershell
-   playwright codegen --target python --channel=chrome "<HELIX_URL>"
-   ```
-
-2. En la ventana de Chrome de codegen, inicia sesión manualmente si SSO no te autentica. No compartas contraseñas, cookies, tokens, datos personales ni capturas con información sensible.
-3. En Helix, haz clic manualmente en `Buscar incidencia`, ingresa un número de prueba autorizado en `ID de la incidencia` y pulsa Enter. No modifiques ni guardes registros.
-4. Indica si después de Enter aparece una lista de resultados o se abre directamente el formulario del incidente. No incluyas credenciales, cookies ni datos sensibles.
-5. Las capturas compartidas permiten usar estos locators para el paso actual:
-
-   ```python
-   OPEN_INCIDENT_SEARCH = LocatorSpec("css", '[ardbn="z2NI_SearchIncident"][artype="NavBarItem"]')
-   SEARCH_FIELD = LocatorSpec("label", "ID de la incidencia*+")
-   ```
-
-   El atributo `ardbn="z2NI_SearchIncident"` se observó en el elemento `NavBarItem` del HTML adjunto; evita la coincidencia con etiquetas de texto ocultas. Evitamos IDs `arid_WIN_…` porque son autogenerados. Los selectores de resultados y verificación se definirán cuando conozcamos el comportamiento de Enter.
-
-El botón de la UI se llama `Buscar incidencia`: navega al formulario, escribe el número, valida el valor y envía Enter. La pestaña queda abierta en la respuesta de Helix.
-
-## Carga y procesamiento de Excel
-
-La UI permite cargar archivos `.xlsx`, `.xlsm` u `.ods` con el botón `Cargar Excel`. La hoja activa debe tener una columna con cabecera `Incidencias`; la cabecera puede estar dentro de las primeras 10 filas. Cada valor se normaliza a mayúsculas y debe cumplir el formato `INC` seguido de 12 dígitos. Las filas vacías se omiten, los duplicados se cargan una sola vez y los valores inválidos se reportan en el log de Tkinter.
-
-Al cargar correctamente, la primera incidencia válida queda escrita en el campo `Número de incidencia` y se genera un TXT en `logs/` con columnas `numero de incidencia` y `Estado`; en ese resumen inicial `OK` significa incidencia válida cargada y `NOK` significa fila inválida o duplicada.
-
-El botón `Procesar Excel` ejecuta las incidencias cargadas una por una. La UI envía una incidencia al trabajador de Playwright, espera que termine con `searched` o `error`, registra el resultado y solo entonces inicia la siguiente. Si una incidencia falla, el lote se detiene por seguridad y genera un reporte parcial para evitar continuar sobre una pantalla posiblemente inconsistente. Durante cada incidencia se muestra `Automatización en proceso`; no manipules Remedy manualmente mientras ese mensaje esté activo, porque la automatización valida cada paso contra la pantalla esperada. Al finalizar el lote se genera un reporte `resultado_cierre_excel_*.txt` en `logs/`.
-
-## Grupo y usuario resolutor
-
-Tkinter ofrece las listas desplegables definidas en `resolver_catalog.local.json`. Al elegir grupo, Usuario Resolutor queda limitado a los usuarios asociados a ese grupo; se debe escoger ambos antes de enviar la incidencia. El archivo `helix_stage1/resolver_catalog.py` solo carga ese JSON local para evitar publicar nombres de personas en el repositorio.
-
-El grupo, usuario y texto de Resolución elegidos en Tkinter viajan con la orden del trabajador. Después de abrir `Redes Chile`, se localiza el widget Estado por `[ardbn="Status"][artype="EnumSel"]`. Dentro de `div.selection`, el input readonly muestra el estado actual y el enlace hermano `a.selectionbtn` abre el menú. La opción se busca solo dentro de `table.MenuTable tr.MenuTableRow td.MenuEntryName`, con texto exacto `Cerrado`, evitando otra coincidencia de la página (`td.f1.trimJustl`). Después se verifica el valor del input Estado.
-
-Para `Motivo del estado`, se usa el control observado `textarea[armenu="SYS:RSN:StatusReason-Q-HPD-HelpDesk"]`; el enlace hermano `a.btn.btn3d.menu` abre su lista. Se selecciona solo la opción visible exacta `Resolución autom. notificada` de `MenuTable` y se verifica el valor del textarea; después se escribe y verifica el textarea etiquetado `Resolución`.
-
-Al final se espera el control `Guardar` de Remedy (`a[artype="Control"][arid="301614800"]`) habilitado y se pulsa una sola vez. El flujo espera una respuesta y busca una confirmación visible de Remedy. Si no la detecta, informa que el clic fue enviado y no lo repite automáticamente; verifica Remedy antes de volver a ejecutar para evitar un guardado duplicado. Si la página sigue abierta, después del guardado se pulsa `Inicio` (`a[artype="Control"][title="Inicio"]`) y se espera nuevamente el menú `Buscar incidencia` para dejar Remedy listo para la próxima búsqueda.
-
-## SSO alternativo: Chrome con depuración remota
-
-Si el perfil aislado `chrome_profile/` no obtiene el SSO automáticamente, se puede iniciar una instancia de Chrome dedicada con depuración remota, autenticarla manualmente y conectar Playwright mediante CDP. Cierra primero la aplicación y cualquier proceso que use ese mismo perfil. En PowerShell, inicia Chrome con un perfil dedicado (ajusta la ruta de `chrome.exe` si fuese necesario):
+Para iniciar:
 
 ```powershell
-& "${env:ProgramFiles}\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --user-data-dir="$PWD\chrome_profile"
+.\.venv\Scripts\python.exe main.py
 ```
 
-Después de autenticarte, la alternativa de conexión en Python es:
+Chrome se abre cuando se envía la primera operación. Mientras la automatización esté trabajando, no manipules Remedy manualmente.
 
-```python
-browser = playwright.chromium.connect_over_cdp("http://127.0.0.1:9222")
-context = browser.contexts[0]
+## Cierre manual
+
+En **Cierre manual**, selecciona Grupo Resolutor y Usuario Resolutor, ingresa una incidencia `INC` seguida de 12 dígitos y escribe la Resolución. La opción **Cerrar tareas asociadas antes del cierre** es voluntaria.
+
+El flujo busca la incidencia, revisa las tareas si se marcó esa opción y, antes de abrir **Redes Chile**, cierra las pendientes una por una; las que ya están cerradas se omiten. Después completa Grupo Resolutor, Usuario Resolutor, Estado **Cerrado**, Motivo del estado **Resolución autom. notificada** y Resolución. Pulsa **Guardar** una vez y vuelve a Inicio para dejar la consola lista. Si ocurre un error, se detiene y lo muestra en la UI.
+
+## Cierre masivo
+
+En **Cierre masivo (Excel)**, carga un archivo `.xlsx`, `.xlsm` u `.ods`. La hoja activa debe contener las columnas **Incidencias** y **Resolución** dentro de las primeras 10 filas. Cada fila necesita su propia Resolución. Se omiten incidencias inválidas, duplicadas o sin Resolución, y se genera un resumen de carga en `logs/`.
+
+Selecciona Grupo Resolutor y Usuario Resolutor, decide si también se cerrarán tareas y pulsa **Iniciar cierre masivo**. La aplicación pide confirmación y procesa las incidencias válidas una a una. Si una falla, detiene el lote y genera un reporte parcial; al terminar sin errores muestra **Trabajos finalizados**. El resultado queda en `logs/resultado_cierre_excel_*.txt`.
+
+## Crear ticket
+
+En **Crear ticket**, elige un Cliente del catálogo local y escribe un título de hasta 100 caracteres. La automatización abre **Nueva incidencia**, selecciona el Cliente sugerido por Remedy, busca la plantilla `TX-`, establece **Condición de falla: Sin Pérdida**, escribe el título en **Resumen** y **Notas**, y cambia **Empresa** a **REDES CHILE** en Categorización. Lee el ID asignado antes de pulsar **Guardar** una sola vez.
+
+Al terminar, la UI deja disponibles el asunto `INC..., título` y el cuerpo del correo para copiar. Puedes elegir un grupo para TO y otro para CC; ambos son opcionales. **Crear correo** abre un borrador en la aplicación de correo predeterminada incluso sin destinatarios, y no lo envía. Cada selección incluye solo las direcciones de ese grupo: los grupos Entel de nueva incidencia, corte troncal y escalamiento TX Core no se combinan; GTD Telsur reúne los contactos de supervisión Telsur y escalamiento GTD. Las direcciones repetidas entre TO y CC se dejan solo en TO. El catálogo de ejemplo está vacío; el local se carga al iniciar la app. Además, agrega una línea `INC..., título` a `logs/Incidencias creadas.txt`. Remedy vuelve a Inicio tras el guardado; el resultado permanece visible hasta el siguiente guardado.
+
+El mensaje de creación indica que **Guardar fue enviado**; este flujo no realiza una búsqueda posterior para comprobar que Remedy haya confirmado el alta. Si el clic queda incierto, la herramienta advierte y no lo reintenta automáticamente.
+
+## Archivos y seguridad
+
+- `helix_stage1/automation.py`: navegación y acciones Playwright; `selectors.py`: selectores observados en Helix.
+- `helix_stage1/ui.py`: interfaz, resultados y reportes; `excel_loader.py`: lectura y validación de planillas.
+- `helix_stage1/resolver_catalog.py`, `customer_catalog.py` y `email_catalog.py`: cargan los JSON locales sin incluir datos reales en el código publicado.
+- `chrome_profile/`, `logs/`, `helix_stage1/local_settings.py` y los catálogos locales de resolutores, clientes y correos están excluidos de Git. El perfil puede contener datos de sesión y los logs pueden contener datos operativos: no los compartas ni los subas manualmente.
+- `logs/automation.log` guarda eventos y errores. La aplicación no toma capturas de pantalla automáticamente.
+
+Los selectores dependen de la interfaz de Helix y pueden necesitar ajustes si Remedy cambia. El cierre intenta reconocer una confirmación visible después de Guardar; si no la encuentra, informa que el clic se envió para que revises Remedy antes de reintentar. La aplicación no debe usarse como prueba independiente de que un cambio quedó persistido.
+
+## Pruebas
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-En ese modo, el cierre debe desconectar Playwright sin cerrar el navegador que el usuario mantiene abierto. Es una alternativa de configuración distinta a `launch_persistent_context`; no se activa automáticamente en esta Etapa 1. No expongas el puerto 9222 fuera de `127.0.0.1`.
-
-## Comportamiento y seguridad
-
-- Tkinter y Playwright se comunican por colas; un único hilo dedicado crea y usa Playwright.
-- El perfil del navegador persiste entre ejecuciones de la aplicación. No uses simultáneamente ese perfil en otra instancia de Chrome.
-- No se reintentan Enter ni Guardar, para evitar acciones duplicadas.
-- Se esperan hasta 90 segundos para cargar navegación y campos; el clic dispone de 30 segundos. Además hay pausas base configurables: 2 s tras cargar consola, 3 s tras seleccionar menú, 1.5 s tras escribir ID, 4 s tras Enter, 3.5 s tras abrir Redes Chile, 2.5 s después de Grupo, sin pausa después de Usuario, 1.5 s tras abrir Estado y 2.5 s después de elegir Cerrado. El valor de Usuario Resolutor se verifica inmediatamente y luego se inicia el paso de Estado.
-- Puedes ajustar los márgenes y timeouts en `helix_stage1/config.py` (`*_SETTLE_DELAY_MS`, `SPA_READY_TIMEOUT_MS`, `RESOLVER_FIELD_TIMEOUT_MS` y `MENU_CLICK_TIMEOUT_MS`). Son pausas de Playwright, no `time.sleep`; los locators siguen esperando hasta sus timeouts si Remedy necesita más tiempo.
-- Se comprueba que el campo visible contenga exactamente el número recibido desde Tkinter.
-- Ante error se registra fecha, incidencia y resultado en `logs/automation.log`. La aplicación no guarda capturas de pantalla automáticamente.
-- Si Helix redirige a login, autentícate manualmente. La herramienta no automatiza SSO.
-- El flujo termina tras enviar Guardar. La UI indica si detectó confirmación de Remedy; si no aparece, verifica el estado en Remedy antes de volver a ejecutar.
+Estas pruebas cubren principalmente el flujo de creación. No sustituyen una prueba controlada en Helix para cierre manual, tareas y cierre masivo.

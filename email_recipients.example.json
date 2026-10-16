@@ -1,0 +1,26 @@
+{
+  "to": {
+    "Entel": {
+      "Nueva incidencia": [],
+      "Corte troncal": [],
+      "Falla de energía": [],
+      "Escalamiento 2da línea TX Core": []
+    },
+    "Tigo": {"Cortes": []},
+    "GTD": {"Servicios bancarios": []},
+    "GTD Telsur": {"General": []},
+    "Claro": {"Back office": []},
+    "Adexus": {"Soporte": []},
+    "Gigared": {"Contactos técnicos": []},
+    "Mundo Pacífico / Holdconet": {"NOC y coordinación": []},
+    "Cirion": {"NOC Customer Assurance": []},
+    "Internexa": {"NOC Customer Service": []},
+    "Silica": {"NOC y monitoreo": []},
+    "Ufinet": {"NOC LATAM": []}
+  },
+  "cc": {
+    "Equipo Entel": [],
+    "Escalamiento 2da línea TX Core": []
+  },
+  "pending_verification": {}
+}

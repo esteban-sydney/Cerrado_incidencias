@@ -39,8 +39,6 @@ class LocatorSpec:
         raise ValueError(f"Tipo de selector no soportado: {self.kind}")
 
 
-# Completar estas tres constantes con los locators generados desde la sesión real.
-# Ejemplo de formato, no es un selector real: LocatorSpec("role", "textbox", name="...")
 OPEN_INCIDENT_SEARCH: LocatorSpec | None = LocatorSpec(
     "css", '[ardbn="z2NI_SearchIncident"][artype="NavBarItem"]'
 )
@@ -124,8 +122,6 @@ TASK_SAVE_BUTTON: LocatorSpec | None = LocatorSpec(
 TASK_INCIDENT_BREADCRUMB: LocatorSpec | None = LocatorSpec(
     "css", 'a.btn:has-text("Incidencia (Buscar)")'
 )
-RESULT_ROW: LocatorSpec | None = None
-INCIDENT_NUMBER_FIELD: LocatorSpec | None = None
 
 
 def missing_selector_names() -> list[str]:

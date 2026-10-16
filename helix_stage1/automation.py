@@ -516,6 +516,21 @@ class AutomationWorker(threading.Thread):
             self.latest_page = page
             self.logger.info("Guardar pulsado para incidencia=%s; creación no verificada", incident_id)
             self._emit("create_save_sent", "Guardar pulsado; creación no verificada.", incident_id, title)
+            try:
+                self._settle(page, SAVE_TO_HOME_DELAY_MS, "el guardado antes de volver a Inicio", incident_id)
+                self._return_home_before_new_incident(page)
+                menu_item = menu_spec.build(page)
+                menu_item.wait_for(state="visible", timeout=SPA_READY_TIMEOUT_MS)
+                self._emit("log", "Remedy quedó en Inicio y listo para otra operación.", incident_id)
+                self._emit("create_home_ready", "Remedy quedó en Inicio.", incident_id)
+            except Exception as error:
+                self._create_form_opened = True
+                self.logger.warning("No se pudo volver a Inicio tras crear %s: %s", incident_id, error)
+                self._emit(
+                    "create_home_warning",
+                    f"Guardar fue enviado para {incident_id}, pero Remedy no volvió a Inicio: {error}",
+                    incident_id,
+                )
         except Exception as error:
             self.logger.exception("Fallo creando incidencia; guardado intentado=%s", save_attempted)
             if save_attempted:
