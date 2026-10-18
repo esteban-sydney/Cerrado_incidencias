@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import json
 import os
 import queue
 import re
@@ -90,6 +91,8 @@ class HelixApp:
         self.batch_running = False
         self.batch_index = 0
         self.batch_results: list[tuple[str, BatchStatus, str]] = []
+        self.batch_checkpoint_path: Path | None = None
+        self.worker_failure_message = ""
         self._row_ids: dict[str, str] = {}
         self._last_incident_text = ""
         self._updating_incident = False
@@ -128,6 +131,7 @@ class HelixApp:
         self._style_treeview()
         self.worker.start()
         self.root.after(100, self._poll_events)
+        self.root.after(200, self._warn_unfinished_batches)
         self.entry.focus_set()
 
     # ------------------------------------------------------------------ UI
@@ -897,6 +901,17 @@ class HelixApp:
         self.batch_running = True
         self.batch_index = 0
         self.batch_results = []
+        self.batch_checkpoint_path = LOG_DIR / (
+            f"cierre_lote_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.json"
+        )
+        try:
+            self._save_batch_checkpoint("running")
+        except OSError as error:
+            self.batch_running = False
+            self.batch_checkpoint_path = None
+            self.status_var.set("No se pudo iniciar el lote: falta el registro de recuperación.")
+            messagebox.showerror("Cierre masivo", f"No se pudo registrar el lote: {error}")
+            return
         self._clear_results_table()
         for record in self.loaded_records:
             self._set_result_row(record.incident, "PENDIENTE", record.resolution, "")
@@ -1056,10 +1071,28 @@ class HelixApp:
         )
         self.batch_index += 1
         self.batch_progress.set(self.batch_index / max(1, len(self.loaded_records)))
+        try:
+            self._save_batch_checkpoint("running")
+        except OSError as error:
+            self.batch_running = False
+            self.status_var.set("Lote detenido: no se pudo actualizar el registro de recuperación.")
+            self._append_log(f"Registro de recuperación no disponible: {error}")
+            try:
+                report_path = self._write_batch_report()
+                self._append_log(f"Reporte parcial generado: {report_path}")
+            except OSError as report_error:
+                self._append_log(f"No se pudo guardar el reporte parcial: {report_error}")
+            self._finish_current_operation()
+            messagebox.showerror("Cierre masivo detenido", f"No se pudo registrar el avance: {error}")
+            return
 
         if status == "ERROR":
             self.batch_running = False
             report_path = self._write_batch_report()
+            try:
+                self._save_batch_checkpoint("stopped")
+            except OSError as error:
+                self._append_log(f"No se pudo cerrar el registro de recuperación: {error}")
             self.status_var.set(
                 f"Excel detenido en {finished_incident}. Revisa el error antes de continuar."
             )
@@ -1086,6 +1119,10 @@ class HelixApp:
     def _finish_batch(self) -> None:
         self.batch_running = False
         report_path = self._write_batch_report()
+        try:
+            self._save_batch_checkpoint("finished")
+        except OSError as error:
+            self._append_log(f"No se pudo marcar el registro de recuperación como finalizado: {error}")
         ok_count = sum(1 for _i, status, _m in self.batch_results if status == "OK")
         skipped_count = sum(1 for _i, status, _m in self.batch_results if status == "OMITIDA")
         error_count = len(self.batch_results) - ok_count - skipped_count
@@ -1135,6 +1172,85 @@ class HelixApp:
                 report.write(f"{incident:<25}{status:<10}{detail}  |  {resolution}\n")
         return report_path
 
+    def _save_batch_checkpoint(self, state: str) -> None:
+        path = getattr(self, "batch_checkpoint_path", None)
+        if path is None:
+            return
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        current = (
+            self.loaded_records[self.batch_index].incident
+            if self.batch_index < len(self.loaded_records) else None
+        )
+        data = {
+            "state": state,
+            "current_incident": current,
+            "pending_incidents": [record.incident for record in self.loaded_records[self.batch_index:]],
+            "results": [
+                {"incident": incident, "status": status, "detail": message}
+                for incident, status, message in self.batch_results
+            ],
+        }
+        temporary = path.with_suffix(".tmp")
+        with temporary.open("w", encoding="utf-8") as output:
+            json.dump(data, output, ensure_ascii=False, indent=2)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+
+    def _warn_unfinished_batches(self) -> None:
+        if self.closing:
+            return
+        unfinished = []
+        for path in LOG_DIR.glob("cierre_lote_*.json"):
+            try:
+                with path.open(encoding="utf-8") as source:
+                    data = json.load(source)
+                if data.get("state") == "running":
+                    unfinished.append((path, data.get("current_incident")))
+            except (OSError, ValueError, AttributeError):
+                self._append_log(f"No se pudo leer el registro de recuperación: {path.name}")
+        if unfinished:
+            path, incident = max(unfinished, key=lambda entry: entry[0].name)
+            self.status_var.set("Hay un cierre masivo interrumpido; revisa Remedy antes de reintentar.")
+            self._append_log(f"Lote interrumpido: {path}; incidencia a verificar: {incident or 'ninguna'}.")
+            messagebox.showwarning(
+                "Cierre masivo interrumpido",
+                f"Revisa {incident or 'la ultima incidencia'} en Remedy antes de reintentar.\n"
+                f"Registro de recuperacion: {path}",
+            )
+
+    def _handle_worker_stopped(self) -> None:
+        message = self.worker_failure_message or "El trabajador de automatización se detuvo."
+        incident = None
+        report_path = None
+        if self.batch_running:
+            incident = self.loaded_records[self.batch_index].incident
+            self.batch_results.append((incident, "ERROR", "Proceso interrumpido; verificar estado en Remedy."))
+            self._set_result_row(
+                incident, "ERROR", self.resolution_by_incident.get(incident, ""),
+                "Estado incierto; verificar en Remedy.",
+            )
+            self.batch_running = False
+            self.batch_progress_var.set(f"Interrumpido: {self.batch_index + 1}/{len(self.loaded_records)}")
+            try:
+                self._save_batch_checkpoint("interrupted")
+                report_path = self._write_batch_report()
+            except OSError as error:
+                self._append_log(f"No se pudo guardar el reporte parcial: {error}")
+        elif self.busy:
+            incident = self.incident_var.get().strip() or None
+        self.busy = True
+        self._set_busy_buttons()
+        self.status_var.set("Automatización detenida; revisa Remedy antes de reiniciar la app.")
+        self._append_log(f"{message} Incidencia a verificar: {incident or 'sin identificar'}.")
+        if report_path:
+            self._append_log(f"Reporte parcial generado: {report_path}")
+        messagebox.showerror(
+            "Automatización detenida",
+            f"{message}\n\nIncidencia a verificar: {incident or 'sin identificar'}.\n"
+            "No se reintentará automáticamente. Revisa Remedy antes de reiniciar la app.",
+        )
+
     # -------------------------------------------------------------- events
     def _poll_events(self) -> None:
         while True:
@@ -1157,9 +1273,9 @@ class HelixApp:
             self._append_log("Aplicación lista.")
             self._finish_current_operation()
         elif event.kind == "warning":
+            self.worker_failure_message = event.message
             self.status_var.set(event.message)
             self._append_log(f"Advertencia: {event.message}")
-            self._finish_current_operation()
         elif event.kind == "create_save_sent":
             if not event.incident or not event.title:
                 self.status_var.set("Guardar pulsado, pero faltan datos del resumen.")
@@ -1215,7 +1331,10 @@ class HelixApp:
             self.status_var.set(f"No se pudo completar: {event.incident}.")
             self._handle_incident_finished(event.incident, "ERROR", event.message)
         elif event.kind == "closed":
-            self.root.destroy()
+            if self.closing:
+                self.root.destroy()
+            else:
+                self._handle_worker_stopped()
 
     def _append_log(self, message: str) -> None:
         stamp = datetime.now().strftime("%H:%M:%S")
