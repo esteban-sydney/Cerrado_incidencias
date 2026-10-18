@@ -32,7 +32,7 @@ REPORT_TITLE_FORMAT = "%m/%d/%Y   %H:%M hrs"
 SHOW_STEP_LOGS = True  # False = el registro solo muestra inicio/fin de cada incidencia
 UI_FONT = "Segoe UI"
 
-BatchStatus = Literal["OK", "ERROR"]
+BatchStatus = Literal["OK", "ERROR", "OMITIDA"]
 
 APPEARANCE_LABELS = {"Sistema": "system", "Claro": "light", "Oscuro": "dark"}
 NO_EMAIL_GROUP = "Sin seleccionar"
@@ -550,6 +550,7 @@ class HelixApp:
         )
         style.map("Helix.Treeview.Heading", background=[("active", head_bg)])
         self.results_table.tag_configure("OK", foreground="#4caf50" if dark else "#1b7f3a")
+        self.results_table.tag_configure("OMITIDA", foreground="#d5a64a" if dark else "#946200")
         self.results_table.tag_configure("ERROR", foreground="#ff6b6b" if dark else "#c62828")
         self.results_table.tag_configure("PENDIENTE", foreground="#9aa0a6" if dark else "#5f6368")
         self.results_table.tag_configure("PROCESANDO", foreground="#4aa3ff" if dark else "#1565c0")
@@ -1034,6 +1035,9 @@ class HelixApp:
             if status == "OK":
                 self._append_log(f"{incident}: cierre OK.")
                 messagebox.showinfo("Trabajo finalizado", f"Cierre manual finalizado para {incident}.")
+            elif status == "OMITIDA":
+                self._append_log(f"{incident}: omitida, ya estaba cerrada.")
+                messagebox.showinfo("Incidencia ya cerrada", f"{incident} ya estaba cerrada; no se modificó.")
             else:
                 self._append_log(f"{incident or 'Incidencia'}: ERROR - {self._shorten_detail(message)}")
                 messagebox.showerror(
@@ -1070,7 +1074,10 @@ class HelixApp:
             )
             return
 
-        self._append_log(f"{finished_incident}: cierre OK.")
+        if status == "OMITIDA":
+            self._append_log(f"{finished_incident}: omitida, ya estaba cerrada.")
+        else:
+            self._append_log(f"{finished_incident}: cierre OK.")
         self.busy = False
         self._submit_next_batch_incident(
             self.resolver_group_var.get(), self.resolver_user_var.get()
@@ -1080,18 +1087,26 @@ class HelixApp:
         self.batch_running = False
         report_path = self._write_batch_report()
         ok_count = sum(1 for _i, status, _m in self.batch_results if status == "OK")
-        error_count = len(self.batch_results) - ok_count
+        skipped_count = sum(1 for _i, status, _m in self.batch_results if status == "OMITIDA")
+        error_count = len(self.batch_results) - ok_count - skipped_count
         self.status_var.set(
-            f"Excel finalizado: {ok_count} OK, {error_count} con error. Revisa el reporte."
+            f"Excel finalizado: {ok_count} OK, {skipped_count} omitidas, "
+            f"{error_count} con error. Revisa el reporte."
         )
         self.batch_progress.set(1)
-        self.batch_progress_var.set(f"Finalizado: {ok_count} OK, {error_count} errores")
-        self._append_log(f"Cierre masivo finalizado: {ok_count} OK, {error_count} errores.")
+        self.batch_progress_var.set(
+            f"Finalizado: {ok_count} OK, {skipped_count} omitidas, {error_count} errores"
+        )
+        self._append_log(
+            f"Cierre masivo finalizado: {ok_count} OK, {skipped_count} omitidas, "
+            f"{error_count} errores."
+        )
         self._append_log(f"Reporte generado: {report_path}")
         self._finish_current_operation()
         messagebox.showinfo(
             "Trabajos finalizados",
-            f"Cierre masivo finalizado.\nOK: {ok_count}\nErrores: {error_count}",
+            f"Cierre masivo finalizado.\nOK: {ok_count}\n"
+            f"Omitidas: {skipped_count}\nErrores: {error_count}",
         )
 
     def _write_batch_report(self) -> Path:
@@ -1105,10 +1120,12 @@ class HelixApp:
             report.write(f"Usuario Resolutor: {self.resolver_user_var.get()}\n")
             report.write("Resolución: individual por incidencia (columna 'Resolución' del Excel)\n\n")
             ok_count = sum(1 for _i, status, _m in self.batch_results if status == "OK")
-            error_count = len(self.batch_results) - ok_count
+            skipped_count = sum(1 for _i, status, _m in self.batch_results if status == "OMITIDA")
+            error_count = len(self.batch_results) - ok_count - skipped_count
             report.write("Resumen:\n")
             report.write(f"Total: {len(self.batch_results)}\n")
             report.write(f"OK: {ok_count}\n")
+            report.write(f"Omitidas: {skipped_count}\n")
             report.write(f"Errores: {error_count}\n\n")
             report.write("Detalle:\n")
             report.write("numero de incidencia      Estado    Detalle  |  Resolución\n")
@@ -1191,6 +1208,9 @@ class HelixApp:
         elif event.kind == "searched":
             self.status_var.set(f"{event.incident}: Guardar enviado. Revisa la confirmación en Remedy.")
             self._handle_incident_finished(event.incident, "OK", event.message)
+        elif event.kind == "skipped_closed":
+            self.status_var.set(f"{event.incident}: ya cerrada, omitida sin cambios.")
+            self._handle_incident_finished(event.incident, "OMITIDA", event.message)
         elif event.kind == "error":
             self.status_var.set(f"No se pudo completar: {event.incident}.")
             self._handle_incident_finished(event.incident, "ERROR", event.message)

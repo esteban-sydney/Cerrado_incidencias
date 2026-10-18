@@ -867,6 +867,13 @@ class AutomationWorker(threading.Thread):
             search_field.press("Enter")
             self._settle(search_page, RESULT_SETTLE_DELAY_MS, "los resultados de búsqueda", incident)
 
+            current_status = self._read_opened_incident_status(search_page, incident)
+            if current_status.casefold() in {"cerrado", "closed"}:
+                self._emit("log", "La incidencia ya está Cerrada; no se modificarán tareas ni campos.", incident)
+                self._return_home_after_save(search_page, incident)
+                self._emit("skipped_closed", "Incidencia ya cerrada; no se modificó.", incident)
+                return
+
             if close_tasks:
                 self._close_pending_tasks(search_page, incident)
 
@@ -1151,6 +1158,43 @@ class AutomationWorker(threading.Thread):
         except Exception as error:
             self.logger.exception("Fallo procesando incidencia=%s resultado=%s", incident, result)
             self._emit("error", str(error), incident)
+
+    def _read_opened_incident_status(self, page: Page, incident: str) -> str:
+        id_fields = self._wait_for_visible_locator_matches(
+            page,
+            selectors.OPENED_INCIDENT_NUMBER_FIELD.build(page),
+            "el ID visible de la incidencia abierta",
+            SPA_READY_TIMEOUT_MS,
+            incident,
+        )
+        if len(id_fields) != 1:
+            raise VerificationError(
+                f"Se esperaba un único ID visible de la incidencia; se encontraron {len(id_fields)}."
+            )
+        opened_id = (id_fields[0].input_value(timeout=DEFAULT_TIMEOUT_MS) or "").strip().upper()
+        if opened_id != incident.upper():
+            raise VerificationError(
+                f"Remedy abrió '{opened_id or 'sin ID'}', no la incidencia '{incident}'."
+            )
+
+        status_widget_spec = selectors.INCIDENT_STATUS_WIDGET
+        assert status_widget_spec is not None
+        status_widget = self._incident_status_widget(
+            page, status_widget_spec.build(page), incident
+        )
+        status_field = status_widget.locator("div.selection input")
+        status_field.wait_for(state="visible", timeout=RESOLVER_FIELD_TIMEOUT_MS)
+        if status_field.count() != 1:
+            raise VerificationError(
+                f"Se esperaba un único campo Estado; se encontraron {status_field.count()}."
+            )
+        status = (status_field.input_value(timeout=DEFAULT_TIMEOUT_MS) or "").strip()
+        if not status:
+            status = (status_field.get_attribute("title") or "").strip()
+        if not status:
+            raise VerificationError("El campo Estado está vacío; no se modificará la incidencia.")
+        self._emit("log", f"Estado actual de la incidencia: {status}.", incident)
+        return status
 
     def _incident_status_widget(self, page: Page, locator: Locator, incident: str) -> Locator:
         visible_status_widgets = self._wait_for_visible_locator_matches(

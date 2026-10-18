@@ -72,6 +72,7 @@ NEW_INCIDENT_NOTES_FIELD: LocatorSpec = LocatorSpec(
 NEW_INCIDENT_NUMBER_FIELD: LocatorSpec = LocatorSpec(
     "css", '[arid="1000000161"][artype="Char"] textarea[readonly]'
 )
+OPENED_INCIDENT_NUMBER_FIELD: LocatorSpec = NEW_INCIDENT_NUMBER_FIELD
 NEW_INCIDENT_SAVE_BUTTON: LocatorSpec = LocatorSpec(
     "css", 'a[artype="Control"][arid="301614800"]:has(div.f1:text-is("Guardar"))'
 )

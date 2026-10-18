@@ -49,7 +49,7 @@ El flujo busca la incidencia, revisa las tareas si se marcó esa opción y, ante
 
 En **Cierre masivo (Excel)**, carga un archivo `.xlsx`, `.xlsm` u `.ods`. La hoja activa debe contener las columnas **Incidencias** y **Resolución** dentro de las primeras 10 filas. Cada fila necesita su propia Resolución. Se omiten incidencias inválidas, duplicadas o sin Resolución, y se genera un resumen de carga en `logs/`.
 
-Selecciona Grupo Resolutor y Usuario Resolutor, decide si también se cerrarán tareas y pulsa **Iniciar cierre masivo**. La aplicación pide confirmación y procesa las incidencias válidas una a una. Si una falla, detiene el lote y genera un reporte parcial; al terminar sin errores muestra **Trabajos finalizados**. El resultado queda en `logs/resultado_cierre_excel_*.txt`.
+Selecciona Grupo Resolutor y Usuario Resolutor, decide si también se cerrarán tareas y pulsa **Iniciar cierre masivo**. La aplicación pide confirmación y procesa las incidencias válidas una a una. Después de buscar cada incidencia, verifica el ID abierto y lee Estado antes de modificar tareas o campos. Si ya está **Cerrado**, vuelve a Inicio, la registra como **Omitida** y continúa con la siguiente. Si no puede verificar el ID o el Estado, o falla el regreso a Inicio, detiene el lote y genera un reporte parcial. Al terminar sin errores muestra **Trabajos finalizados** con conteos separados de OK, omitidas y errores. El resultado queda en `logs/resultado_cierre_excel_*.txt`.
 
 ## Crear ticket
 
