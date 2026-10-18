@@ -876,6 +876,16 @@ class AutomationWorker(threading.Thread):
 
             if close_tasks:
                 self._close_pending_tasks(search_page, incident)
+            else:
+                self._emit("log", "Comprobando tareas abiertas sin modificarlas…", incident)
+                self._open_tasks_tab(search_page, incident)
+                pending_task = self._first_pending_task(search_page, incident)
+                if pending_task is not None:
+                    raise AutomationError(
+                        f"No se puede cerrar {incident}: contiene la tarea abierta "
+                        f"{pending_task['task_id']} (Estado: {pending_task['state']}). "
+                        "Activa 'Cerrar tareas asociadas antes del cierre' y vuelve a intentarlo."
+                    )
 
             tab_spec = selectors.NETWORKS_CHILE_TAB
             group_spec = selectors.RESOLVER_GROUP_FIELD

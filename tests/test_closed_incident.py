@@ -36,12 +36,12 @@ class ClosedIncidentTests(unittest.TestCase):
         self.worker._read_opened_incident_status = MagicMock(return_value="Cerrado")
         return page
 
-    def _run_search(self) -> list[automation.WorkerEvent]:
+    def _run_search(self, close_tasks: bool = True) -> list[automation.WorkerEvent]:
         with patch.object(automation, "HELIX_URL", "https://example.invalid"), patch.object(
             selectors, "OPEN_INCIDENT_SEARCH", MagicMock()
         ) as menu_spec, patch.object(selectors, "SEARCH_FIELD", MagicMock()):
             menu_spec.build.return_value.count.return_value = 1
-            self.worker._process_incident(INCIDENT, "Grupo", "Usuario", "Resolución", True)
+            self.worker._process_incident(INCIDENT, "Grupo", "Usuario", "Resolución", close_tasks)
         events = []
         while not self.events.empty():
             events.append(self.events.get_nowait())
@@ -80,6 +80,68 @@ class ClosedIncidentTests(unittest.TestCase):
         self.worker._close_pending_tasks.assert_called_once()
         self.worker._return_home_after_save.assert_not_called()
         self.assertNotIn("skipped_closed", [event.kind for event in events])
+
+    def test_open_task_without_task_closure_stops_before_editing_incident(self) -> None:
+        self._prepare_closed_search()
+        self.worker._read_opened_incident_status.return_value = "Asignado"
+        self.worker._open_tasks_tab = MagicMock()
+        self.worker._first_pending_task = MagicMock(
+            return_value={"task_id": "TAS000000000001", "state": "Asignado"}
+        )
+
+        events = self._run_search(close_tasks=False)
+
+        self.worker._open_tasks_tab.assert_called_once()
+        self.worker._first_pending_task.assert_called_once()
+        self.worker._close_pending_tasks.assert_not_called()
+        self.worker._return_home_after_save.assert_not_called()
+        errors = [event for event in events if event.kind == "error"]
+        self.assertEqual(len(errors), 1)
+        self.assertIn("No se puede cerrar", errors[0].message)
+        self.assertIn("TAS000000000001", errors[0].message)
+
+    def test_no_open_task_without_task_closure_continues_to_networks(self) -> None:
+        self._prepare_closed_search()
+        self.worker._read_opened_incident_status.return_value = "Asignado"
+        self.worker._open_tasks_tab = MagicMock()
+        self.worker._first_pending_task = MagicMock(return_value=None)
+        networks_tab = MagicMock()
+        networks_tab.build.side_effect = automation.AutomationError("Llegó a Redes Chile")
+
+        with patch.object(selectors, "NETWORKS_CHILE_TAB", networks_tab):
+            events = self._run_search(close_tasks=False)
+
+        self.worker._close_pending_tasks.assert_not_called()
+        self.worker._first_pending_task.assert_called_once()
+        self.assertTrue(any(
+            event.kind == "error" and event.message == "Llegó a Redes Chile"
+            for event in events
+        ))
+
+    def test_open_task_error_is_visible_and_recorded_in_batch(self) -> None:
+        app = ui.HelixApp.__new__(ui.HelixApp)
+        app.batch_running = True
+        app.batch_index = 0
+        app.loaded_records = [IncidentRecord(INCIDENT, "Resolución")]
+        app.batch_results = []
+        app.resolution_by_incident = {INCIDENT: "Resolución"}
+        app.status_var = MagicMock()
+        app.batch_progress = MagicMock()
+        app.batch_progress_var = MagicMock()
+        app._set_result_row = MagicMock()
+        app._append_log = MagicMock()
+        app._save_batch_checkpoint = MagicMock()
+        app._write_batch_report = MagicMock(return_value=Path("reporte.txt"))
+        app._finish_current_operation = MagicMock()
+        message = "No se puede cerrar INC000000000001: contiene la tarea abierta TAS000000000001."
+
+        with patch.object(ui.messagebox, "showerror") as showerror:
+            app._handle_event(automation.WorkerEvent("error", message, INCIDENT))
+
+        self.assertFalse(app.batch_running)
+        self.assertEqual(app.batch_results, [(INCIDENT, "ERROR", message)])
+        app._write_batch_report.assert_called_once()
+        self.assertIn("tarea abierta", showerror.call_args.args[1])
 
     def test_status_read_verifies_opened_id_before_status(self) -> None:
         page = MagicMock()
